@@ -47,6 +47,7 @@ struct CatSettings {
     bool obsHideDesktop = false;
     bool autoHideFullscreen = false;
     bool autoHeadphonesOnMusic = true;
+    bool suppressAutoUpdatePrompt = false;
     int tabletMode = 0; // 0 = auto-detect tablet/stylus, 1 = always tablet, 2 = always mouse
     bool flipHorizontal = false;
     float rotationDeg = 0.0f; // -180..180 degrees
@@ -93,6 +94,7 @@ struct CatSettings {
         obsHideDesktop   = readDword(L"OBSHideDesktop", 0) != 0;
         autoHideFullscreen = readDword(L"AutoHideFullscreen", 0) != 0;
         autoHeadphonesOnMusic = readDword(L"AutoHeadphonesOnMusic", 1) != 0;
+        suppressAutoUpdatePrompt = readDword(L"SuppressAutoUpdatePrompt", 0) != 0;
         tabletMode       = std::clamp((int)readDword(L"TabletMode", 0), 0, 2);
         flipHorizontal   = readDword(L"FlipHorizontal", 0) != 0;
         {
@@ -175,6 +177,7 @@ struct CatSettings {
         writeDword(L"OBSHideDesktop", obsHideDesktop ? 1 : 0);
         writeDword(L"AutoHideFullscreen", autoHideFullscreen ? 1 : 0);
         writeDword(L"AutoHeadphonesOnMusic", autoHeadphonesOnMusic ? 1 : 0);
+        writeDword(L"SuppressAutoUpdatePrompt", suppressAutoUpdatePrompt ? 1 : 0);
         writeDword(L"TabletMode", (DWORD)tabletMode);
         writeDword(L"FlipHorizontal", flipHorizontal ? 1 : 0);
         writeDword(L"RotationTenths", (DWORD)(int)std::lround(std::clamp(rotationDeg, -180.0f, 180.0f) * 10.0f));

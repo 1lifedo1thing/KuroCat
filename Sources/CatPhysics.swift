@@ -91,9 +91,13 @@ final class CatSettings {
     var autoHideFullscreen: Bool {
         didSet { UserDefaults.standard.set(autoHideFullscreen, forKey: "KuroCat.AutoHideFullscreen") }
     }
-    /// Automatically put on headphones with gentle rhythm & music notes when a music/media player is playing
+    /// Automatically put on headphones with gentle rhythm & music notes when audio/video/music is playing
     var autoHeadphonesOnMusic: Bool {
         didSet { UserDefaults.standard.set(autoHeadphonesOnMusic, forKey: "KuroCat.AutoHeadphonesOnMusic") }
+    }
+    /// When true, automatic startup update checks stay silent (user clicked "暂不更新"); manual check still works
+    var suppressAutoUpdatePrompt: Bool {
+        didSet { UserDefaults.standard.set(suppressAutoUpdatePrompt, forKey: "KuroCat.SuppressAutoUpdatePrompt") }
     }
     /// 0 = Auto-detect graphics tablet/stylus, 1 = Always show tablet, 2 = Always show mouse
     var tabletMode: Int {
@@ -214,6 +218,7 @@ final class CatSettings {
         obsHideDesktop = d.object(forKey: "KuroCat.OBSHideDesktop") as? Bool ?? false
         autoHideFullscreen = d.object(forKey: "KuroCat.AutoHideFullscreen") as? Bool ?? false
         autoHeadphonesOnMusic = d.object(forKey: "KuroCat.AutoHeadphonesOnMusic") as? Bool ?? true
+        suppressAutoUpdatePrompt = d.object(forKey: "KuroCat.SuppressAutoUpdatePrompt") as? Bool ?? false
         tabletMode = d.object(forKey: "KuroCat.TabletMode") as? Int ?? 0
         flipHorizontal = d.object(forKey: "KuroCat.FlipHorizontal") as? Bool ?? false
         rotationDeg = CGFloat(d.object(forKey: "KuroCat.RotationDeg") as? Double ?? 0.0)
@@ -1549,7 +1554,11 @@ struct SkinColor: Hashable {
         SkinColor(r: CGFloat((rgb >> 16) & 255)/255, g: CGFloat((rgb >> 8) & 255)/255, b: CGFloat(rgb & 255)/255, a: a)
     }
     var ns: NSColor { NSColor(calibratedRed: r, green: g, blue: b, alpha: a) }
-    func withAlpha(_ alpha: CGFloat) -> NSColor { NSColor(calibratedRed: r, green: g, blue: b, alpha: alpha) }
+    var srgbNS: NSColor { NSColor(srgbRed: r, green: g, blue: b, alpha: a) }
+    func withAlpha(_ alpha: CGFloat, srgb: Bool = false) -> NSColor {
+        srgb ? NSColor(srgbRed: r, green: g, blue: b, alpha: a * alpha)
+             : NSColor(calibratedRed: r, green: g, blue: b, alpha: a * alpha)
+    }
     var luminance: CGFloat { 0.2126 * r + 0.7152 * g + 0.0722 * b }
 }
 
@@ -1558,7 +1567,7 @@ enum SkinSpace: String { case head, skull, body, tail, leftEar, rightEar, leftAr
 enum SkinBuild: String { case standard, sleek }
 enum SkinHeadSurface: String { case dome, plane }
 enum SkinAnchorPoint: String { case headTop, face, neck, tailTip }
-enum SkinRenderStyle: String { case standard, douni, dazed }
+enum SkinRenderStyle: String { case standard, douni, dazed, beagle }
 enum SkinTypingStyle: String { case standard, douni }
 
 /// One pen-tool anchor; in/out are absolute handle positions in the same part space.
@@ -2013,7 +2022,7 @@ struct SkinSpec {
         let w = image.width, h = image.height
         guard w > 0, h > 0,
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return image
         }

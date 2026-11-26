@@ -48,6 +48,7 @@ struct CatSettings {
     bool obsHideDesktop = false;
     bool autoHideFullscreen = false;
     bool autoHeadphonesOnMusic = true;
+    bool suppressAutoUpdatePrompt = false;
     int tabletMode = 0; // 0 = auto-detect tablet/stylus, 1 = always tablet, 2 = always mouse
     bool flipHorizontal = false;
     float rotationDeg = 0.0f; // -180..180 degrees
@@ -107,6 +108,7 @@ struct CatSettings {
                 else if (k == "obsHideDesktop") obsHideDesktop = (std::stoi(v) != 0);
                 else if (k == "autoHideFullscreen") autoHideFullscreen = (std::stoi(v) != 0);
                 else if (k == "autoHeadphonesOnMusic") autoHeadphonesOnMusic = (std::stoi(v) != 0);
+                else if (k == "suppressAutoUpdatePrompt") suppressAutoUpdatePrompt = (std::stoi(v) != 0);
                 else if (k == "tabletMode") tabletMode = std::clamp(std::stoi(v), 0, 2);
                 else if (k == "flipHorizontal") flipHorizontal = (std::stoi(v) != 0);
                 else if (k == "rotationDeg") rotationDeg = std::clamp(std::stof(v), -180.0f, 180.0f);
@@ -154,6 +156,7 @@ struct CatSettings {
           << "obsHideDesktop=" << (obsHideDesktop ? 1 : 0) << "\n"
           << "autoHideFullscreen=" << (autoHideFullscreen ? 1 : 0) << "\n"
           << "autoHeadphonesOnMusic=" << (autoHeadphonesOnMusic ? 1 : 0) << "\n"
+          << "suppressAutoUpdatePrompt=" << (suppressAutoUpdatePrompt ? 1 : 0) << "\n"
           << "tabletMode=" << tabletMode << "\n"
           << "flipHorizontal=" << (flipHorizontal ? 1 : 0) << "\n"
           << "rotationDeg=" << rotationDeg << "\n"

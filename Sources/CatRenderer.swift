@@ -14,6 +14,11 @@ enum CatRenderer {
     private static let blackOutlineWidth: CGFloat = 1.8
     private static let blackOutlineColor = NSColor(calibratedWhite: 1.0, alpha: 0.96)
     private static let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
+    private static let srgbColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    private static func usesSRGB(_ skin: SkinSpec) -> Bool { !skin.builtIn && skin.author != "KuroCat" }
+    private static func skinColorSpace(_ skin: SkinSpec) -> CGColorSpace { usesSRGB(skin) ? srgbColorSpace : rgbColorSpace }
+    private static func sc(_ c: SkinColor, _ skin: SkinSpec) -> NSColor { usesSRGB(skin) ? c.srgbNS : c.ns }
+    private static func sc(_ c: SkinColor, _ alpha: CGFloat, _ skin: SkinSpec) -> NSColor { c.withAlpha(alpha, srgb: usesSRGB(skin)) }
 
     private static let hazelRingColors: [CGColor] = (0...24).map { i in
         let t = CGFloat(i) / 24.0
@@ -81,16 +86,30 @@ enum CatRenderer {
                 blue: CGFloat(hex & 255) / 255, alpha: alpha)
     }
 
+    private static func isClassicBlack(_ skin: SkinSpec) -> Bool {
+        skin.builtIn && skin.id == "builtin:0"
+    }
+
     private static func isClassicBlackRim(_ skin: SkinSpec) -> Bool {
         skin.id == "builtin:0" || (!skin.colorpoint && skin.palette.outline == nil && !skin.idleLegsTinted && skin.marks.isEmpty && skin.regions.isEmpty && skin.palette.body.luminance < 0.12)
     }
 
     private static func usesPatternedMuzzle(_ skin: SkinSpec) -> Bool {
-        skin.palette.nose == nil && skin.palette.mouth == nil && skin.palette.belly != nil && !skin.marks.isEmpty && !skin.idleLegsTinted
+        guard skin.palette.nose == nil && skin.palette.mouth == nil else { return false }
+        if skin.builtIn { return skin.id == "builtin:2" || skin.id == "builtin:3" }
+        return skin.author == "KuroCat" && skin.palette.belly != nil && !skin.marks.isEmpty && !skin.idleLegsTinted
     }
 
     private static func isMilkMark(_ mark: SkinMark) -> Bool {
         abs(mark.color.r - 242.0 / 255.0) < 0.01 && abs(mark.color.g - 238.0 / 255.0) < 0.01 && abs(mark.color.b - 228.0 / 255.0) < 0.01
+    }
+
+    private static func usesStarterMilkSurface(_ skin: SkinSpec, _ mark: SkinMark) -> Bool {
+        (skin.builtIn || skin.author == "KuroCat") && isMilkMark(mark)
+    }
+
+    private static func shouldSkipJawHeadClip(_ mark: SkinMark) -> Bool {
+        mark.clipToBib || (mark.space == .head && !mark.stroke && isMilkMark(mark) && mark.points.contains { abs($0.x) > 46 })
     }
 
     static let permissionPillRect = CGRect(x: 92, y: 294, width: 176, height: 22)
@@ -346,6 +365,29 @@ enum CatRenderer {
         let lie = max(0, min(1, physics.lieIntensity.value))
         let dizzy = max(0, min(1, physics.dizzyIntensity.value))
         let kbSkin = settings.activeKeyboardSkin
+
+        if skin.renderStyle == .beagle {
+            drawBeagleScene(
+                in: ctx,
+                physics: physics,
+                skin: skin,
+                kbSkin: kbSkin,
+                kbTheme: settings.keyboardTheme,
+                eyeTheme: settings.eyeTheme,
+                showLegends: settings.showKeyLegends,
+                flipped: flipped,
+                marquee: settings.keyboardMarquee
+            )
+            drawSparkles(in: ctx, physics: physics, eyeTheme: settings.eyeTheme, flipped: flipped)
+            if !physics.floatingKeycaps.isEmpty {
+                drawFloatingKeycaps(in: ctx, physics: physics, flipped: flipped)
+            }
+            if !isPreview && showPermissionPill {
+                drawPermissionPill(in: ctx, text: permissionPillText)
+            }
+            ctx.restoreGState()
+            return
+        }
 
         if skin.renderStyle == .douni {
             drawDouniScene(
@@ -649,11 +691,12 @@ enum CatRenderer {
         ctx.addLine(to: CGPoint(x: ax + 0.8, y: ay + 2.4))
         ctx.strokePath()
 
-        // Compact bottom readout badge (scale + optional angle / flip marker)
+        // Compact bottom readout badge (scale + optional angle / flip marker + edit hint)
         var statusStr = String(format: "%.0f%%", scale * 100)
         let roundedDeg = Int(rotationDeg.rounded())
         if roundedDeg != 0 { statusStr += " · \(roundedDeg)°" }
         if flipped { statusStr += " · ⇄" }
+        statusStr += isEnglish ? " · Edit (2× exit)" : " · 编辑框 (双击退出)"
         let sAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold),
             .foregroundColor: NSColor.white
@@ -1632,9 +1675,15 @@ enum CatRenderer {
         }
     }
 
+    private struct PartGradientKey: Hashable {
+        let grad: SkinPartGradient
+        let srgb: Bool
+    }
+
     private struct ColorPairKey: Hashable {
         let first: SkinColor
         let second: SkinColor
+        let srgb: Bool
     }
 
     private struct PointsGradients {
@@ -1644,6 +1693,7 @@ enum CatRenderer {
 
     private struct HeadGeometryKey: Hashable {
         let skinId: String
+        let srgb: Bool
         let headScale: CGFloat
         let cheekFullness: CGFloat
         let isDome: Bool
@@ -1667,6 +1717,7 @@ enum CatRenderer {
 
     private struct BodyGeometryKey: Hashable {
         let skinId: String
+        let srgb: Bool
         let bodyWidth: CGFloat
         let regionCount: Int
         let markCount: Int
@@ -1682,7 +1733,7 @@ enum CatRenderer {
     }
 
     private static var jawSideCache: [CGFloat: (body: [CGPoint], head: [CGPoint])] = [:]
-    private static var partGradientCache: [SkinPartGradient: CGGradient] = [:]
+    private static var partGradientCache: [PartGradientKey: CGGradient] = [:]
     private static var bodyShadeGradientCache: [ColorPairKey: CGGradient] = [:]
     private static var pointsGradientCache: [ColorPairKey: PointsGradients] = [:]
     private static var headGeometryCache: [HeadGeometryKey: HeadGeometryEntry] = [:]
@@ -1703,45 +1754,51 @@ enum CatRenderer {
         return head ? entry.head : entry.body
     }
 
-    private static func cachedPartGradient(_ g: SkinPartGradient) -> CGGradient? {
-        if let hit = partGradientCache[g] { return hit }
+    private static func cachedPartGradient(_ g: SkinPartGradient, srgb: Bool = false) -> CGGradient? {
+        let key = PartGradientKey(grad: g, srgb: srgb)
+        if let hit = partGradientCache[key] { return hit }
         if partGradientCache.count > 128 { partGradientCache.removeAll(keepingCapacity: true) }
         let stop = max(0.1, min(0.9, g.stop))
-        let cols = [g.from.ns.cgColor, g.to.ns.cgColor, g.to.ns.cgColor] as CFArray
-        guard let grad = CGGradient(colorsSpace: rgbColorSpace, colors: cols, locations: [0.0, stop, 1.0]) else { return nil }
-        partGradientCache[g] = grad
+        let cols = [(srgb ? g.from.srgbNS : g.from.ns).cgColor,
+                    (srgb ? g.to.srgbNS : g.to.ns).cgColor,
+                    (srgb ? g.to.srgbNS : g.to.ns).cgColor] as CFArray
+        let cs = srgb ? srgbColorSpace : rgbColorSpace
+        guard let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, stop, 1.0]) else { return nil }
+        partGradientCache[key] = grad
         return grad
     }
 
-    private static func cachedBodyShadeGradient(body: SkinColor, shade: SkinColor) -> CGGradient? {
-        let key = ColorPairKey(first: body, second: shade)
+    private static func cachedBodyShadeGradient(body: SkinColor, shade: SkinColor, srgb: Bool = false) -> CGGradient? {
+        let key = ColorPairKey(first: body, second: shade, srgb: srgb)
         if let hit = bodyShadeGradientCache[key] { return hit }
         if bodyShadeGradientCache.count > 64 { bodyShadeGradientCache.removeAll(keepingCapacity: true) }
-        let colors = [body.ns.cgColor, shade.ns.cgColor] as CFArray
-        guard let grad = CGGradient(colorsSpace: rgbColorSpace, colors: colors, locations: [0.15, 1.0]) else { return nil }
+        let colors = [(srgb ? body.srgbNS : body.ns).cgColor, (srgb ? shade.srgbNS : shade.ns).cgColor] as CFArray
+        let cs = srgb ? srgbColorSpace : rgbColorSpace
+        guard let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0.15, 1.0]) else { return nil }
         bodyShadeGradientCache[key] = grad
         return grad
     }
 
-    private static func cachedPointsGradients(point: SkinColor, mid: SkinColor) -> PointsGradients {
-        let key = ColorPairKey(first: point, second: mid)
+    private static func cachedPointsGradients(point: SkinColor, mid: SkinColor, srgb: Bool = false) -> PointsGradients {
+        let key = ColorPairKey(first: point, second: mid, srgb: srgb)
         if let hit = pointsGradientCache[key] { return hit }
         if pointsGradientCache.count > 64 { pointsGradientCache.removeAll(keepingCapacity: true) }
-        let pointCG = point.ns.cgColor
+        let pointCG = (srgb ? point.srgbNS : point.ns).cgColor
         let maskCols = [
             pointCG,
-            point.withAlpha(0.92).cgColor,
-            mid.withAlpha(0.62).cgColor,
-            mid.withAlpha(0.0).cgColor
+            point.withAlpha(0.92, srgb: srgb).cgColor,
+            mid.withAlpha(0.62, srgb: srgb).cgColor,
+            mid.withAlpha(0.0, srgb: srgb).cgColor
         ] as CFArray
         let muzzleCols = [
             pointCG,
-            point.withAlpha(0.85).cgColor,
-            point.withAlpha(0.0).cgColor
+            point.withAlpha(0.85, srgb: srgb).cgColor,
+            point.withAlpha(0.0, srgb: srgb).cgColor
         ] as CFArray
+        let cs = srgb ? srgbColorSpace : rgbColorSpace
         let entry = PointsGradients(
-            mask: CGGradient(colorsSpace: rgbColorSpace, colors: maskCols, locations: [0.0, 0.42, 0.74, 1.0]),
-            muzzle: CGGradient(colorsSpace: rgbColorSpace, colors: muzzleCols, locations: [0.0, 0.50, 1.0])
+            mask: CGGradient(colorsSpace: cs, colors: maskCols, locations: [0.0, 0.42, 0.74, 1.0]),
+            muzzle: CGGradient(colorsSpace: cs, colors: muzzleCols, locations: [0.0, 0.50, 1.0])
         )
         pointsGradientCache[key] = entry
         return entry
@@ -1753,7 +1810,7 @@ enum CatRenderer {
         let needsJawBody = skin.partGradients["body"] != nil
             || skin.regions.contains { $0.space == .body }
             || skin.marks.contains { $0.space == .body }
-        let needsJawHead = skin.palette.headBody != nil
+        let needsJawHead = (skin.palette.headBody != nil && skin.palette.headBody != skin.palette.body)
             || skin.partGradients["head"] != nil
             || skin.regions.contains { $0.space == .head || $0.space == .skull }
             || skin.marks.contains { $0.space == .head || $0.space == .skull }
@@ -1769,7 +1826,7 @@ enum CatRenderer {
         for region in skin.regions where region.space == .head || region.space == .skull {
             let isSkull = region.space == .skull
             let p = polyline(region.flat, closed: true) { t.mapRelative($0, skull: isSkull) }
-            headRegions.append((p, region.fill.ns.cgColor))
+            headRegions.append((p, sc(region.fill, skin).cgColor))
         }
 
         let bib = coverage > 0
@@ -1786,9 +1843,9 @@ enum CatRenderer {
             switch mark.space {
             case .skull:
                 markPaths[idx] = polyline(mark.points, closed: !mark.stroke) { t.mapRelative($0, skull: true) }
-                markColors[idx] = mark.color.ns.cgColor
+                markColors[idx] = sc(mark.color, skin).cgColor
             case .head:
-                let useWhite = isDome && isMilkMark(mark)
+                let useWhite = isDome && usesStarterMilkSurface(skin, mark)
                 if mark.clipToBib, let bib = bib {
                     if useWhite {
                         if bibPathWhite == nil {
@@ -1807,7 +1864,7 @@ enum CatRenderer {
                 } else {
                     markPaths[idx] = polyline(mark.points, closed: !mark.stroke) { t.mapRelative($0, skull: false, whiteSurface: useWhite) }
                 }
-                markColors[idx] = mark.color.ns.cgColor
+                markColors[idx] = sc(mark.color, skin).cgColor
             default:
                 break
             }
@@ -1830,6 +1887,7 @@ enum CatRenderer {
         }
         let key = HeadGeometryKey(
             skinId: skin.id,
+            srgb: usesSRGB(skin),
             headScale: skin.shape.headScale,
             cheekFullness: skin.shape.cheekFullness,
             isDome: skin.headSurface == .dome,
@@ -1851,13 +1909,13 @@ enum CatRenderer {
         let t = BodyTransform(bodyWidth: skin.shape.bodyWidth, bodySquash: bodySquash, lieIntensity: lieIntensity, bodyTilt: bodyTilt)
         var bodyRegions: [(path: CGPath, color: CGColor)] = []
         for region in skin.regions where region.space == .body {
-            bodyRegions.append((polyline(region.flat, closed: true) { t.mapRelative($0) }, region.fill.ns.cgColor))
+            bodyRegions.append((polyline(region.flat, closed: true) { t.mapRelative($0) }, sc(region.fill, skin).cgColor))
         }
         var markPaths = [CGPath?](repeating: nil, count: skin.marks.count)
         var markColors = [CGColor?](repeating: nil, count: skin.marks.count)
         for (idx, mark) in skin.marks.enumerated() where mark.space == .body {
             markPaths[idx] = polyline(mark.points, closed: !mark.stroke) { t.mapRelative($0) }
-            markColors[idx] = mark.color.ns.cgColor
+            markColors[idx] = sc(mark.color, skin).cgColor
         }
         return BodyGeometryEntry(bodyRegions: bodyRegions, markPaths: markPaths, markColors: markColors)
     }
@@ -1868,6 +1926,7 @@ enum CatRenderer {
         }
         let key = BodyGeometryKey(
             skinId: skin.id,
+            srgb: usesSRGB(skin),
             bodyWidth: skin.shape.bodyWidth,
             regionCount: skin.regions.count,
             markCount: skin.marks.count,
@@ -1917,24 +1976,49 @@ enum CatRenderer {
         if closed { path.closeSubpath() }
         return path
     }
+    private static func mappedPolyline(_ points: [CGPoint], closed: Bool) -> CGMutablePath {
+        let path = CGMutablePath()
+        for (i, p) in points.enumerated() {
+            if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+        }
+        if closed { path.closeSubpath() }
+        return path
+    }
     /// Strokes get round caps, except tail-space strokes (bands around the tail) which are cut flat.
-    private static func drawMark(in ctx: CGContext, _ mark: SkinMark, cap: CGLineCap = .round, map: (CGPoint) -> CGPoint) {
+    private static func drawMark(in ctx: CGContext, _ mark: SkinMark, cap: CGLineCap = .round, srgb: Bool = false, map: (CGPoint) -> CGPoint) {
         guard !mark.points.isEmpty else { return }
         ctx.saveGState()
-        let color = mark.color.ns
+        let mapped = mark.points.map(map)
+        let color = srgb ? mark.color.srgbNS : mark.color.ns
+        let isSingleDot = mapped.count <= 1 || mapped.dropFirst().allSatisfy {
+            hypot($0.x - mapped[0].x, $0.y - mapped[0].y) < 0.001
+        }
         if !mark.stroke {
-            let path = polyline(mark.points, closed: true, map: map)
-            path.closeSubpath(); ctx.setFillColor(color.cgColor); ctx.addPath(path); ctx.fillPath()
+            if mapped.count == 1 {
+                ctx.setFillColor(color.cgColor)
+                ctx.fillEllipse(in: CGRect(x: mapped[0].x - 1.0, y: mapped[0].y - 1.0, width: 2.0, height: 2.0))
+                ctx.restoreGState()
+                return
+            }
+            if mapped.count == 2 {
+                ctx.setStrokeColor(color.cgColor)
+                ctx.setLineWidth(1.0)
+                ctx.setLineCap(.round)
+                ctx.move(to: mapped[0]); ctx.addLine(to: mapped[1]); ctx.strokePath()
+                ctx.restoreGState()
+                return
+            }
+            let path = mappedPolyline(mapped, closed: true)
+            ctx.setFillColor(color.cgColor); ctx.addPath(path); ctx.fillPath()
             ctx.restoreGState()
             return
         }
 
         let baseW = mark.width > 0 ? mark.width : 2.0
         if mark.brush == .airbrush {
-            let mapped = mark.points.map(map)
             let radius = max(2.2, baseW * 1.15)
             let stepDist = max(1.4, radius * 0.34)
-            let cs = CGColorSpaceCreateDeviceRGB()
+            let cs = srgb ? srgbColorSpace : rgbColorSpace
             let r = mark.color.r, g = mark.color.g, b = mark.color.b, a = mark.color.a
             let colors: [CGColor] = [
                 CGColor(colorSpace: cs, components: [r, g, b, a * 0.34])!,
@@ -1974,12 +2058,21 @@ enum CatRenderer {
             let passes: [(mul: CGFloat, a: CGFloat)] = mark.brush == .smudge
                 ? [(1.0 + soft * 1.25, 0.12), (1.0 + soft * 0.72, 0.18), (1.0 + soft * 0.25, 0.28), (0.68, 0.42)]
                 : [(1.0 + soft * 1.15, 0.14), (1.0 + soft * 0.65, 0.24), (1.0 + soft * 0.22, 0.38), (0.72, 0.62)]
-            let path = polyline(mark.points, closed: false, map: map)
+            if isSingleDot {
+                let p0 = mapped[0]
+                for pass in passes {
+                    let r = max(0.3, baseW * pass.mul * 0.5)
+                    ctx.setFillColor(mark.color.withAlpha(pass.a, srgb: srgb).cgColor)
+                    ctx.fillEllipse(in: CGRect(x: p0.x - r, y: p0.y - r, width: r * 2, height: r * 2))
+                }
+                ctx.restoreGState()
+                return
+            }
+            let path = mappedPolyline(mapped, closed: false)
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
             for pass in passes {
-                let passColor = NSColor(srgbRed: mark.color.r, green: mark.color.g, blue: mark.color.b, alpha: mark.color.a * pass.a)
-                ctx.setStrokeColor(passColor.cgColor)
+                ctx.setStrokeColor(mark.color.withAlpha(pass.a, srgb: srgb).cgColor)
                 ctx.setLineWidth(max(0.6, baseW * pass.mul))
                 ctx.addPath(path)
                 ctx.strokePath()
@@ -1988,13 +2081,24 @@ enum CatRenderer {
             return
         }
 
-        let path = polyline(mark.points, closed: false, map: map)
+        if isSingleDot {
+            if cap == .round {
+                let p0 = mapped[0]
+                let r = baseW * 0.5
+                ctx.setFillColor(color.cgColor)
+                ctx.fillEllipse(in: CGRect(x: p0.x - r, y: p0.y - r, width: baseW, height: baseW))
+            }
+            ctx.restoreGState()
+            return
+        }
+
+        let path = mappedPolyline(mapped, closed: false)
         ctx.setStrokeColor(color.cgColor); ctx.setLineWidth(baseW)
         ctx.setLineCap(cap); ctx.setLineJoin(.round); ctx.addPath(path); ctx.strokePath()
         ctx.restoreGState()
     }
-    private static func drawRegion(in ctx: CGContext, _ region: SkinRegion, map: (CGPoint) -> CGPoint) {
-        ctx.setFillColor(region.fill.ns.cgColor)
+    private static func drawRegion(in ctx: CGContext, _ region: SkinRegion, srgb: Bool = false, map: (CGPoint) -> CGPoint) {
+        ctx.setFillColor((srgb ? region.fill.srgbNS : region.fill.ns).cgColor)
         ctx.addPath(polyline(region.flat, closed: true, map: map))
         ctx.fillPath()
     }
@@ -2500,22 +2604,24 @@ enum CatRenderer {
         in ctx: CGContext,
         _ g: SkinPartGradient,
         start: CGPoint,
-        end: CGPoint
+        end: CGPoint,
+        srgb: Bool = false
     ) {
         if hypot(end.x - start.x, end.y - start.y) < 1.0 {
-            ctx.setFillColor(g.to.ns.cgColor)
+            ctx.setFillColor((srgb ? g.to.srgbNS : g.to.ns).cgColor)
             ctx.fill(ctx.boundingBoxOfClipPath)
             return
         }
-        if let grad = cachedPartGradient(g) {
+        if let grad = cachedPartGradient(g, srgb: srgb) {
             ctx.drawLinearGradient(grad, start: start, end: end, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
         } else {
-            ctx.setFillColor(g.to.ns.cgColor)
+            ctx.setFillColor((srgb ? g.to.srgbNS : g.to.ns).cgColor)
             ctx.fill(ctx.boundingBoxOfClipPath)
         }
     }
 
     private static func drawTail(in ctx: CGContext, seatX: CGFloat, seatY: CGFloat, physics: CatPhysics, skin: SkinSpec, outlineOnly: Bool = false) {
+        let srgb = usesSRGB(skin)
         let curve = tailCurve(seatX: seatX, seatY: seatY, physics: physics, skin: skin)
         let awakeTailWidth = (skin.renderStyle == .dazed) ? 13.0 : (build(skin).tailWidth * skin.shape.tailThickness)
         let lie = max(0, min(1, physics.lieIntensity.value))
@@ -2544,10 +2650,10 @@ enum CatRenderer {
             ctx.saveGState()
             ctx.addPath(strokedTail)
             ctx.clip()
-            drawClampedPartGradient(in: ctx, tailGrad, start: curve.root, end: curve.tip)
+            drawClampedPartGradient(in: ctx, tailGrad, start: curve.root, end: curve.tip, srgb: srgb)
             ctx.restoreGState()
         } else {
-            ctx.setStrokeColor(skin.palette.tail.ns.cgColor)
+            ctx.setStrokeColor(sc(skin.palette.tail, skin).cgColor)
             ctx.setLineWidth(width)
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
@@ -2558,7 +2664,7 @@ enum CatRenderer {
         if lieS > 0.35 {
             let rAlpha = min(1.0, (lieS - 0.35) / 0.45) * 0.72
             ctx.saveGState()
-            ctx.setStrokeColor(skin.palette.crease.withAlpha(rAlpha).cgColor)
+            ctx.setStrokeColor(sc(skin.palette.crease, rAlpha, skin).cgColor)
             ctx.setLineWidth(1.45)
             ctx.setLineCap(.round)
             ctx.move(to: CGPoint(x: curve.root.x - 4, y: curve.root.y - 3))
@@ -2576,21 +2682,21 @@ enum CatRenderer {
             ctx.addPath(line.copy(strokingWithWidth: width, lineCap: .round, lineJoin: .round, miterLimit: 10))
             ctx.clip()
             let map: (CGPoint) -> CGPoint = { curve.at($0) }
-            for region in skin.regions where region.space == .tail { drawRegion(in: ctx, region, map: map) }
+            for region in skin.regions where region.space == .tail { drawRegion(in: ctx, region, srgb: srgb, map: map) }
             if let tipColor = skin.palette.tailTip {
                 // Last 22% of the tail: de Casteljau split at t = 0.78, stroked with the tail width.
                 let t: CGFloat = 0.78, u = 1 - t
                 func lerp(_ a: CGPoint, _ b: CGPoint) -> CGPoint { CGPoint(x: u*a.x + t*b.x, y: u*a.y + t*b.y) }
                 let a = lerp(curve.root, curve.c1), b = lerp(curve.c1, curve.c2), q = lerp(curve.c2, curve.tip)
                 let d = lerp(a, b), e = lerp(b, q), s = lerp(d, e)
-                ctx.setStrokeColor(tipColor.ns.cgColor)
+                ctx.setStrokeColor(sc(tipColor, skin).cgColor)
                 ctx.setLineWidth(width + 2)
                 ctx.setLineCap(.round)
                 ctx.move(to: s)
                 ctx.addCurve(to: curve.tip, control1: e, control2: q)
                 ctx.strokePath()
             }
-            for mark in skin.marks where mark.space == .tail { drawMark(in: ctx, mark, cap: .butt, map: map) }
+            for mark in skin.marks where mark.space == .tail { drawMark(in: ctx, mark, cap: .butt, srgb: srgb, map: map) }
             ctx.restoreGState()
         }
         ctx.restoreGState()
@@ -2724,26 +2830,28 @@ enum CatRenderer {
         let hasRegions = skin.regions.contains { partSpaces.contains($0.space) }
         let hasMarks = skin.marks.contains { partSpaces.contains($0.space) }
 
+        let srgb = usesSRGB(skin)
+        let hasHeadBody = pal.headBody != nil && pal.headBody != pal.body
         ctx.saveGState()
         if pal.bodyShade == nil {
-            ctx.setFillColor(pal.body.ns.cgColor)
+            ctx.setFillColor(sc(pal.body, skin).cgColor)
             ctx.addPath(path)
             ctx.fillPath()
-            if skin.headSurface == .dome && pal.body != pal.earOuter && !skin.colorpoint && !skin.marks.isEmpty && !skin.idleLegsTinted {
+            if (skin.builtIn && skin.id == "builtin:3") || (!skin.builtIn && skin.author == "KuroCat" && skin.headSurface == .dome && pal.body != pal.earOuter && !skin.marks.isEmpty) {
                 // Overlap the matching fur colors at the ear/crown join so the
                 // white torso underpaint cannot leave an antialiased seam.
                 let join = CGMutablePath()
                 join.move(to: lCheek)
                 join.addCurve(to: crown, control1: H(leftCheekX - 1.5, cheekCtrlTopY), control2: H(-crownCtrlW + cheekShift * 0.3, crownBaseY + crownDrop))
                 join.addCurve(to: rCheek, control1: H(crownCtrlW + cheekShift * 0.3, crownBaseY + crownDrop), control2: H(rightCheekX + 1.5, cheekCtrlTopY))
-                ctx.setStrokeColor(pal.earOuter.ns.cgColor); ctx.setLineWidth(1.0); ctx.setLineCap(.round)
+                ctx.setStrokeColor(sc(pal.earOuter, skin).cgColor); ctx.setLineWidth(1.0); ctx.setLineCap(.round)
                 ctx.addPath(join); ctx.strokePath()
             }
         }
-        if pal.bodyShade != nil || pal.headBody != nil || skin.partGradients["body"] != nil || skin.partGradients["head"] != nil || skin.colorpoint || hasRegions || hasMarks {
+        if pal.bodyShade != nil || hasHeadBody || skin.partGradients["body"] != nil || skin.partGradients["head"] != nil || skin.colorpoint || hasRegions || hasMarks {
             ctx.saveGState(); ctx.addPath(path); ctx.clip()
 
-            if let shade = pal.bodyShade, let grad = cachedBodyShadeGradient(body: pal.body, shade: shade) {
+            if let shade = pal.bodyShade, let grad = cachedBodyShadeGradient(body: pal.body, shade: shade, srgb: srgb) {
                 // Warm oat-milk cream gradient + soft toasted back shading
                 ctx.drawLinearGradient(
                     grad,
@@ -2753,7 +2861,7 @@ enum CatRenderer {
                 )
             }
 
-            let needsHeadGeo = pal.headBody != nil
+            let needsHeadGeo = hasHeadBody
                 || skin.partGradients["body"] != nil
                 || skin.partGradients["head"] != nil
                 || hasRegions
@@ -2770,17 +2878,17 @@ enum CatRenderer {
                 ctx.addPath(jawBodyPath)
                 ctx.clip()
                 ctx.translateBy(x: -headCenter.x, y: -headCenter.y)
-                drawClampedPartGradient(in: ctx, bodyGrad, start: CGPoint(x: seatX, y: seatY - 78), end: CGPoint(x: seatX, y: seatY + 16))
+                drawClampedPartGradient(in: ctx, bodyGrad, start: CGPoint(x: seatX, y: seatY - 78), end: CGPoint(x: seatX, y: seatY + 16), srgb: srgb)
                 ctx.restoreGState()
             }
 
-            if let headBody = pal.headBody, let jawHeadPath = headGeo?.jawHeadPath {
+            if hasHeadBody, let headBody = pal.headBody, let jawHeadPath = headGeo?.jawHeadPath {
                 ctx.saveGState()
                 ctx.translateBy(x: headCenter.x, y: headCenter.y)
                 ctx.addPath(jawHeadPath)
                 ctx.clip()
                 ctx.translateBy(x: -headCenter.x, y: -headCenter.y)
-                ctx.setFillColor(headBody.ns.cgColor)
+                ctx.setFillColor(sc(headBody, skin).cgColor)
                 ctx.addPath(path)
                 ctx.fillPath()
                 ctx.restoreGState()
@@ -2792,7 +2900,7 @@ enum CatRenderer {
                 ctx.addPath(jawHeadPath)
                 ctx.clip()
                 ctx.translateBy(x: -headCenter.x, y: -headCenter.y)
-                drawClampedPartGradient(in: ctx, headGrad, start: CGPoint(x: headCenter.x, y: headCenter.y - 44), end: CGPoint(x: headCenter.x, y: headCenter.y + 40))
+                drawClampedPartGradient(in: ctx, headGrad, start: CGPoint(x: headCenter.x, y: headCenter.y - 44), end: CGPoint(x: headCenter.x, y: headCenter.y + 40), srgb: srgb)
                 ctx.restoreGState()
             }
 
@@ -2800,7 +2908,7 @@ enum CatRenderer {
                 let mid = pal.pointsMid ?? point
                 let yawRad = yaw * 0.50
                 let pitchRad = pitch * 0.36
-                let pointGrads = cachedPointsGradients(point: point, mid: mid)
+                let pointGrads = cachedPointsGradients(point: point, mid: mid, srgb: srgb)
                 ctx.saveGState()
                 ctx.translateBy(x: headCenter.x, y: headCenter.y)
                 ctx.rotate(by: hTilt)
@@ -2895,7 +3003,7 @@ enum CatRenderer {
                 let bodyTx = BodyTransform(bodyWidth: skin.shape.bodyWidth, bodySquash: physics.bodySquash.value, lieIntensity: lie, bodyTilt: bTilt)
                 for (idx, mark) in skin.marks.enumerated() {
                     if mark.clipToBib && coverage == 0 { continue }
-                    let needsBrushRender = mark.stroke && mark.brush != .round
+                    let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
                     switch mark.space {
                     case .body:
                         if let bodyGeo,
@@ -2908,7 +3016,7 @@ enum CatRenderer {
                             ctx.clip()
                             ctx.translateBy(x: seatX - headCenter.x, y: seatY - headCenter.y)
                             if needsBrushRender {
-                                drawMark(in: ctx, mark, map: { bodyTx.mapRelative($0) })
+                                drawMark(in: ctx, mark, srgb: srgb, map: { bodyTx.mapRelative($0) })
                             } else {
                                 drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
                             }
@@ -2919,9 +3027,9 @@ enum CatRenderer {
                            let mColor = headGeo.markColors[idx] {
                             ctx.saveGState()
                             ctx.translateBy(x: headCenter.x, y: headCenter.y)
-                            let skipJawClip = (mark.space == .head && (mark.clipToBib || (!mark.stroke && isMilkMark(mark) && mark.points.contains { abs($0.x) > 46 })))
+                            let skipJawClip = shouldSkipJawHeadClip(mark)
                             if mark.space == .head && mark.clipToBib {
-                                let useWhite = isDome && isMilkMark(mark)
+                                let useWhite = isDome && usesStarterMilkSurface(skin, mark)
                                 if let bibPath = useWhite ? headGeo.bibPathWhite : headGeo.bibPathNormal {
                                     ctx.addPath(bibPath)
                                     ctx.clip()
@@ -2932,7 +3040,7 @@ enum CatRenderer {
                             }
                             if needsBrushRender {
                                 let isSkull = (mark.space == .skull)
-                                drawMark(in: ctx, mark, map: { headTx.mapRelative($0, skull: isSkull) })
+                                drawMark(in: ctx, mark, srgb: srgb, map: { headTx.mapRelative($0, skull: isSkull) })
                             } else {
                                 drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
                             }
@@ -2950,7 +3058,7 @@ enum CatRenderer {
         // Ultra-soft plush rim (the Siamese cream body; never a harsh dark outline)
         if let outline = pal.outline {
             ctx.saveGState()
-            ctx.setStrokeColor(outline.ns.cgColor)
+            ctx.setStrokeColor(sc(outline, skin).cgColor)
             ctx.setLineWidth(1.0)
             ctx.addPath(path)
             ctx.strokePath()
@@ -2962,7 +3070,7 @@ enum CatRenderer {
         ctx.translateBy(x: seatX, y: seatY)
         ctx.rotate(by: bTilt)
         ctx.scaleBy(x: sx, y: sy)
-        ctx.setFillColor(pal.paws.ns.cgColor)
+        ctx.setFillColor(sc(pal.hindPaw ?? pal.paws, skin).cgColor)
 
         ctx.fillEllipse(in: CGRect(x: leftHindX, y: leftHindY, width: hindW, height: leftHindH))
         if rightTucked {
@@ -2971,9 +3079,9 @@ enum CatRenderer {
 
         // Subtle bottom rim highlights on tucked haunches
         let rimColor = skin.colorpoint
-            ? pal.body.withAlpha(0.55)
-            : (isClassicBlackRim(skin) ? blackOutlineColor.withAlphaComponent(0.0) : pal.crease.withAlpha(0.58))
-        ctx.setStrokeColor(rimColor.withAlphaComponent(rimColor.alphaComponent * (1.0 - sharedSleep)).cgColor)
+            ? sc(pal.body, 0.55 * (1.0 - sharedSleep), skin)
+            : sc(pal.crease, 0.58 * (1.0 - sharedSleep), skin)
+        ctx.setStrokeColor(rimColor.cgColor)
         ctx.setLineWidth(1.3)
         ctx.setLineCap(.round)
         ctx.addArc(center: CGPoint(x: leftHindX + hindW * 0.5, y: leftHindY + leftHindH * 0.5), radius: 7.5, startAngle: 0.25, endAngle: .pi - 0.25, clockwise: false)
@@ -2983,7 +3091,7 @@ enum CatRenderer {
             ctx.strokePath()
         }
         if let pads = pal.pawPads {
-            ctx.setFillColor(pads.ns.cgColor)
+            ctx.setFillColor(sc(pads, skin).cgColor)
             for side in 0..<(rightTucked ? 2 : 1) {
                 let cx = (side == 1 ? rightHindX : leftHindX) + hindW * 0.5
                 let cy = side == 1 ? rightHindY + rightHindH * 0.5 : leftHindY + leftHindH * 0.5
@@ -3250,7 +3358,7 @@ enum CatRenderer {
                 nPath.addQuadCurve(to: CGPoint(x: nose.x, y: nose.y + 1.5), control: CGPoint(x: nose.x + 1.8, y: nose.y + 0.6))
                 nPath.addQuadCurve(to: CGPoint(x: nose.x - 2.3, y: nose.y - 1.1), control: CGPoint(x: nose.x - 1.8, y: nose.y + 0.6))
                 nPath.closeSubpath()
-                ctx.setFillColor(noseColor.ns.cgColor)
+                ctx.setFillColor(sc(noseColor, skin).cgColor)
                 ctx.addPath(nPath)
                 ctx.fillPath()
             }
@@ -3259,7 +3367,7 @@ enum CatRenderer {
                 let mouthM = projectHead3D(x: 0, y: 11.2, z: 28.8, yawRad: yawRad, pitchRad: pitchRad).pt
                 let mouthR = projectHead3D(x: 4.2, y: 12.2, z: 28.4, yawRad: yawRad, pitchRad: pitchRad).pt
                 // Delicate light-mocha `ω` kitty mouth (hidden while mouth is open yawning)
-                ctx.setStrokeColor(mouthColor.ns.cgColor)
+                ctx.setStrokeColor(sc(mouthColor, skin).cgColor)
                 ctx.setLineWidth(1.05)
                 ctx.setLineCap(.round)
                 ctx.move(to: mouthL)
@@ -3508,11 +3616,12 @@ enum CatRenderer {
             let earMid = CGPoint(x: (innerBase3D.x + outerBase3D.x) * 0.5, y: (innerBase3D.y + outerBase3D.y) * 0.5)
             ctx.saveGState()
             ctx.addPath(ear)
+            let srgb = usesSRGB(skin)
             ctx.clip()
-            drawClampedPartGradient(in: ctx, earGrad, start: earMid, end: tip3D)
+            drawClampedPartGradient(in: ctx, earGrad, start: earMid, end: tip3D, srgb: srgb)
             ctx.restoreGState()
         } else {
-            ctx.setFillColor(skin.palette.earOuter.ns.cgColor)
+            ctx.setFillColor(sc(skin.palette.earOuter, skin).cgColor)
             ctx.addPath(ear)
             ctx.fillPath()
         }
@@ -3530,12 +3639,13 @@ enum CatRenderer {
             inner.addQuadCurve(to: tipI, control: CGPoint(x: (inI.x + tipI.x) * 0.5 - sign * 0.8, y: (inI.y + tipI.y) * 0.5))
             inner.addQuadCurve(to: outI, control: CGPoint(x: (outI.x + tipI.x) * 0.5 + sign * 1.2, y: (outI.y + tipI.y) * 0.5))
             inner.closeSubpath()
-            ctx.setFillColor(innerColor.ns.cgColor)
+            ctx.setFillColor(sc(innerColor, skin).cgColor)
             ctx.addPath(inner)
             ctx.fillPath()
         }
 
         if skin.hasPartArt(space) {
+            let srgb = usesSRGB(skin)
             // Ear space: (-50,0) inner base, (50,0) outer base, (0,-100) tip; mirrored per ear.
             let m = CGPoint(x: (innerBase3D.x + outerBase3D.x) * 0.5, y: (innerBase3D.y + outerBase3D.y) * 0.5)
             let inB = innerBase3D, outB = outerBase3D, tipP = tip3D
@@ -3546,8 +3656,8 @@ enum CatRenderer {
             ctx.saveGState()
             ctx.addPath(ear)
             ctx.clip()
-            for region in skin.regions where region.space == space { drawRegion(in: ctx, region, map: map) }
-            for mark in skin.marks where mark.space == space { drawMark(in: ctx, mark, map: map) }
+            for region in skin.regions where region.space == space { drawRegion(in: ctx, region, srgb: srgb, map: map) }
+            for mark in skin.marks where mark.space == space { drawMark(in: ctx, mark, srgb: srgb, map: map) }
             ctx.restoreGState()
         }
         ctx.restoreGState()
@@ -3568,7 +3678,7 @@ enum CatRenderer {
         let sign: CGFloat = isLeft ? -1.0 : 1.0
         let customIris = overrideSkinIris ? nil : ((isLeft ? skin.palette.irisLeft : skin.palette.irisRight) ?? skin.palette.iris)
         let customPupil = (isLeft ? skin.palette.pupilLeft : skin.palette.pupilRight) ?? skin.palette.pupil
-        let eyeColor = customIris?.ns ?? eyeTheme.primaryColor
+        let eyeColor = customIris.map { sc($0, skin) } ?? eyeTheme.primaryColor
         let siameseBlue = customIris == nil && eyeTheme == .siameseBlue
 
         // Eye sits on the front surface of the 3D head sphere at (±17.5, -2.0, +28.0)
@@ -3740,7 +3850,7 @@ enum CatRenderer {
                 ctx.fillEllipse(in: pupilRect.insetBy(dx: -rim, dy: -rim))
             }
         }
-        ctx.setFillColor((customPupil?.ns ?? catBlack).cgColor)
+        ctx.setFillColor((customPupil.map { sc($0, skin) } ?? catBlack).cgColor)
         ctx.fillEllipse(in: pupilRect)
 
         // Tiny crisp white specular sparkle dot (subtle catchlight on translucent Siamese blue eyes + hunting boba sparkle!)
@@ -3785,7 +3895,7 @@ enum CatRenderer {
     ) {
         let wiggle = sin(physics.time * 4.5) * (max(physics.petHeadIntensity, physics.petBodyIntensity) * 1.2)
         ctx.saveGState()
-        ctx.setStrokeColor(skin.palette.whiskers.ns.cgColor)
+        ctx.setStrokeColor(sc(skin.palette.whiskers, skin).cgColor)
         ctx.setLineWidth(1.0)
         ctx.setLineCap(.round)
 
@@ -3915,6 +4025,7 @@ enum CatRenderer {
         let idleBotY: CGFloat = max(max(leftIdleTop.y, rightIdleTop.y) + 14.0, (seatY + 12.0 + (armLen - 1.0) * 16.0) + lieS * 12.0)
         let idleAlpha: CGFloat = 1.0 - smoothstep(0.48, 0.78, lieS)
 
+        let elbowFlare = (armLen - 1.0) * 18.0
         // Left arm
         if lDist < 6.0 && !physics.leftPawOnMouse && !physics.leftPawTyping {
             if idleAlpha > 0.01 {
@@ -3925,8 +4036,8 @@ enum CatRenderer {
             }
         } else {
             let mid = CGPoint(
-                x: (leftShoulder.x + lPos.x) * 0.5 - (physics.leftPawOnMouse ? 8 : 4),
-                y: max((leftShoulder.y + lPos.y) * 0.5 - 6, faceBottom - 1.0)
+                x: (leftShoulder.x + lPos.x) * 0.5 - (physics.leftPawOnMouse ? 8 : 6) - elbowFlare,
+                y: (leftShoulder.y + lPos.y) * 0.5 - 6 + elbowFlare * 0.4
             )
             drawLimb(
                 in: ctx,
@@ -3953,8 +4064,8 @@ enum CatRenderer {
             }
         } else {
             let mid = CGPoint(
-                x: (rightShoulder.x + rPos.x) * 0.5 + 4,
-                y: max((rightShoulder.y + rPos.y) * 0.5 - 6, faceBottom - 1.0)
+                x: (rightShoulder.x + rPos.x) * 0.5 + 4 + elbowFlare,
+                y: (rightShoulder.y + rPos.y) * 0.5 - 6 + elbowFlare * 0.4
             )
             drawLimb(
                 in: ctx,
@@ -3995,12 +4106,13 @@ enum CatRenderer {
             ctx.saveGState()
             ctx.addPath(legPath)
             ctx.clip()
+            let cs = skinColorSpace(skin)
             let colors = [
-                pal.body.withAlpha(0.0).cgColor,
-                mid.withAlpha(0.75).cgColor,
-                point.ns.cgColor
+                sc(pal.body, 0.0, skin).cgColor,
+                sc(mid, 0.75, skin).cgColor,
+                sc(point, skin).cgColor
             ] as CFArray
-            if let grad = CGGradient(colorsSpace: rgbColorSpace, colors: colors, locations: [0.05, 0.50, 0.82]) {
+            if let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0.05, 0.50, 0.82]) {
                 ctx.drawLinearGradient(
                     grad,
                     start: CGPoint(x: top.x, y: top.y),
@@ -4010,6 +4122,8 @@ enum CatRenderer {
             }
             ctx.restoreGState()
         } else {
+            let srgb = usesSRGB(skin)
+            let cs = skinColorSpace(skin)
             // Smooth shoulder-fade leg fill so palette.legs shows cleanly on idle sitting legs too
             // ("idleLegs": "legs"; the built-in coats use "chest" and keep their approved look)
             let legShape = CGMutablePath()
@@ -4036,14 +4150,14 @@ enum CatRenderer {
                 ctx.saveGState()
                 ctx.addPath(legShape)
                 ctx.clip()
-                drawClampedPartGradient(in: ctx, armGrad, start: top, end: CGPoint(x: bottom.x, y: bottom.y + 5.0))
+                drawClampedPartGradient(in: ctx, armGrad, start: top, end: CGPoint(x: bottom.x, y: bottom.y + 5.0), srgb: srgb)
                 ctx.restoreGState()
             } else if skin.idleLegsTinted {
                 ctx.saveGState()
                 ctx.addPath(legShape)
                 ctx.clip()
-                let legCols = [pal.legs.withAlpha(0.0).cgColor, pal.legs.ns.cgColor, pal.legs.ns.cgColor] as CFArray
-                if let legGrad = CGGradient(colorsSpace: rgbColorSpace, colors: legCols, locations: [0.04, 0.32, 1.0]) {
+                let legCols = [sc(pal.legs, 0.0, skin).cgColor, sc(pal.legs, skin).cgColor, sc(pal.legs, skin).cgColor] as CFArray
+                if let legGrad = CGGradient(colorsSpace: cs, colors: legCols, locations: [0.04, 0.32, 1.0]) {
                     ctx.drawLinearGradient(
                         legGrad,
                         start: CGPoint(x: top.x, y: top.y),
@@ -4065,8 +4179,8 @@ enum CatRenderer {
                 ctx.saveGState()
                 ctx.addPath(legShape)
                 ctx.clip()
-                for region in skin.regions where region.space == armSpace { drawRegion(in: ctx, region, map: map) }
-                for mark in skin.marks where mark.space == armSpace { drawMark(in: ctx, mark, map: map) }
+                for region in skin.regions where region.space == armSpace { drawRegion(in: ctx, region, srgb: srgb, map: map) }
+                for mark in skin.marks where mark.space == armSpace { drawMark(in: ctx, mark, srgb: srgb, map: map) }
                 ctx.restoreGState()
             }
 
@@ -4081,11 +4195,11 @@ enum CatRenderer {
                 ctx.strokePath()
                 ctx.restoreGState()
             }
-            ctx.setFillColor(pal.paws.ns.cgColor)
+            ctx.setFillColor(sc(pal.paws, skin).cgColor)
             ctx.addPath(cuffPath)
             ctx.fillPath()
         }
-        let lineColor = isClassicBlackRim(skin) ? blackOutlineColor.withAlphaComponent(0.75) : pal.crease.ns
+        let lineColor = isClassicBlackRim(skin) ? blackOutlineColor.withAlphaComponent(0.75) : sc(pal.crease, skin)
         ctx.setStrokeColor(lineColor.cgColor)
         ctx.setLineWidth(1.45)
         ctx.setLineCap(.round)
@@ -4189,6 +4303,8 @@ enum CatRenderer {
             return
         }
 
+        let srgb = usesSRGB(skin)
+        let cs = skinColorSpace(skin)
         ctx.saveGState()
         if let point = pal.points {
             // Colour-point chocolate-dipped socks gradient along the limb!
@@ -4198,22 +4314,22 @@ enum CatRenderer {
             ctx.addPath(limbPath)
             ctx.clip()
             let colors = [
-                pal.body.withAlpha(0.0).cgColor,
-                pal.body.ns.cgColor,
-                mid.ns.cgColor,
-                point.ns.cgColor
+                sc(pal.body, 0.0, skin).cgColor,
+                sc(pal.body, skin).cgColor,
+                sc(mid, skin).cgColor,
+                sc(point, skin).cgColor
             ] as CFArray
-            if let grad = CGGradient(colorsSpace: rgbColorSpace, colors: colors, locations: [0.0, 0.16, 0.48, 0.78]) {
+            if let grad = CGGradient(colorsSpace: cs, colors: colors, locations: [0.0, 0.16, 0.48, 0.78]) {
                 ctx.drawLinearGradient(grad, start: start, end: end, options: [.drawsAfterEndLocation])
             }
             ctx.restoreGState()
 
             // Solid rich espresso-chocolate rounded paw tip (no winding-rule overlap artifacts!)
-            ctx.setFillColor(pal.paws.ns.cgColor)
+            ctx.setFillColor(sc(pal.paws, skin).cgColor)
             ctx.fillEllipse(in: pawRect)
 
             // Clean outer edge outline on the arm (fading in below shoulder) so it reads crisply over light backgrounds
-            ctx.setStrokeColor(lineColor.withAlpha(0.72).cgColor)
+            ctx.setStrokeColor(sc(lineColor, 0.72, skin).cgColor)
             ctx.setLineWidth(1.25)
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
@@ -4228,17 +4344,17 @@ enum CatRenderer {
             let limbSpace: SkinSpace = frontPaw ? (isLeftArm ? .leftArm : .rightArm) : .hindLeg
             let limbBaseCol = frontPaw ? pal.legs : (pal.hindLeg ?? pal.legs)
             let limbPawCol = frontPaw ? pal.paws : (pal.hindPaw ?? pal.paws)
-            ctx.setFillColor(limbBaseCol.ns.cgColor)
+            ctx.setFillColor(sc(limbBaseCol, skin).cgColor)
             ctx.addPath(limbPath)
             if let limbGrad = skin.partGradients[limbSpace.rawValue] {
                 ctx.saveGState(); ctx.clip()
-                drawClampedPartGradient(in: ctx, limbGrad, start: start, end: end)
+                drawClampedPartGradient(in: ctx, limbGrad, start: start, end: end, srgb: srgb)
                 ctx.restoreGState()
             } else if frontPaw, let chest = pal.belly, chest != limbBaseCol {
                 // White chest fading into the leg colour along the first 30% of the arm.
                 ctx.saveGState(); ctx.clip()
-                let colors = [chest.ns.cgColor, limbBaseCol.ns.cgColor] as CFArray
-                if let gradient = CGGradient(colorsSpace: rgbColorSpace, colors: colors, locations: [0, 0.30]) {
+                let colors = [sc(chest, skin).cgColor, sc(limbBaseCol, skin).cgColor] as CFArray
+                if let gradient = CGGradient(colorsSpace: cs, colors: colors, locations: [0, 0.30]) {
                     ctx.drawLinearGradient(gradient, start: start, end: end,
                                            options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
                 }
@@ -4259,11 +4375,11 @@ enum CatRenderer {
                 ctx.saveGState()
                 ctx.addPath(limbPath)
                 ctx.clip()
-                for region in skin.regions where region.space == limbSpace { drawRegion(in: ctx, region, map: map) }
-                for mark in skin.marks where mark.space == limbSpace { drawMark(in: ctx, mark, map: map) }
+                for region in skin.regions where region.space == limbSpace { drawRegion(in: ctx, region, srgb: srgb, map: map) }
+                for mark in skin.marks where mark.space == limbSpace { drawMark(in: ctx, mark, srgb: srgb, map: map) }
                 ctx.restoreGState()
             }
-            if limbPawCol == limbBaseCol { ctx.setFillColor(limbPawCol.ns.cgColor); ctx.fillEllipse(in: pawRect) }
+            if limbPawCol == limbBaseCol { ctx.setFillColor(sc(limbPawCol, skin).cgColor); ctx.fillEllipse(in: pawRect) }
             else {
                 let cuff = CGMutablePath()
                 let first = Int(CGFloat(steps) * 0.72)
@@ -4271,17 +4387,17 @@ enum CatRenderer {
                 for pt in leftEdge.dropFirst(first + 1) { cuff.addLine(to: pt) }
                 for pt in rightEdge.dropFirst(first).reversed() { cuff.addLine(to: pt) }
                 cuff.closeSubpath()
-                ctx.setFillColor(limbPawCol.ns.cgColor); ctx.addPath(cuff); ctx.fillPath()
+                ctx.setFillColor(sc(limbPawCol, skin).cgColor); ctx.addPath(cuff); ctx.fillPath()
                 ctx.fillEllipse(in: pawRect)
             }
         }
 
         // Crisp separation stroke along upper-to-mid arm where it crosses the torso
         let highlightEdge = outlineOnLeftSide ? leftEdge : rightEdge
-        if highlightEdge.count > 6 && !isClassicBlackRim(skin) {
+        if highlightEdge.count > 6 {
             let strokeColor = skin.colorpoint
-                ? lineColor.withAlpha(outlineAlpha * 0.78)
-                : pal.crease.withAlpha(outlineAlpha * 0.9)
+                ? sc(lineColor, outlineAlpha * 0.78, skin)
+                : sc(pal.crease, outlineAlpha * 0.9, skin)
             ctx.setStrokeColor(strokeColor.cgColor)
             ctx.setLineWidth(1.35)
             ctx.setLineCap(.round)
@@ -4603,6 +4719,173 @@ enum CatRenderer {
     }
 
     /// Top-level Xiao Douni scene router inside KuroCat's 360x320 canvas.
+    // MARK: - Beagle Duodong (比格瞳 · 彩蛋限定) Layered Sprite Rig
+
+    private static func drawBeagleSprite(in ctx: CGContext, _ key: String, cx: CGFloat, cy: CGFloat, sc: CGFloat, rot: CGFloat = 0, flipX: Bool = false) {
+        guard let img = BeagleAtlas.sprites[key] else { return }
+        let dw = CGFloat(img.width) * sc
+        let dh = CGFloat(img.height) * sc
+        ctx.saveGState()
+        ctx.translateBy(x: cx, y: cy)
+        if rot != 0 { ctx.rotate(by: rot) }
+        // CGContext.draw draws images upside-down in a flipped Y-down context, so flip Y locally
+        ctx.scaleBy(x: flipX ? -1.0 : 1.0, y: -1.0)
+        ctx.draw(img, in: CGRect(x: -dw * 0.5, y: -dh * 0.5, width: dw, height: dh))
+        ctx.restoreGState()
+    }
+
+    private static func drawBeagleScene(
+        in ctx: CGContext,
+        physics: CatPhysics,
+        skin: SkinSpec,
+        kbSkin: KeyboardSkinSpec,
+        kbTheme: KeyboardTheme,
+        eyeTheme: EyeColorTheme,
+        showLegends: Bool,
+        flipped: Bool,
+        marquee: Bool
+    ) {
+        let scruff = max(0, min(1, physics.scruffDrag.value))
+        let scruffS = scruff * scruff * (3.0 - 2.0 * scruff)
+        let lie = max(0, min(1, physics.lieIntensity.value))
+        let sleepVal = max(lie, physics.sleepiness > 0.55 ? min(1.0, (physics.sleepiness - 0.55) / 0.35) : 0.0)
+        let sleepS = (sleepVal * sleepVal * (3.0 - 2.0 * sleepVal)) * (1.0 - scruffS)
+        let anger = max(0, min(1, physics.angerIntensity.value))
+        let happy = max(physics.petHeadIntensity, physics.petBodyIntensity)
+        let t = physics.time
+        let breath = sin(t * 2.3) * 1.6
+        let seatX = CatPhysics.seatAnchor.x + physics.bodyShiftX.value
+
+        let deskAlpha = 1.0 - min(1.0, scruffS / 0.55)
+        if deskAlpha > 0.02 {
+            ctx.saveGState()
+            ctx.setAlpha(deskAlpha)
+            if physics.isTabletActive {
+                drawTablet(in: ctx, physics: physics, theme: kbTheme, eyeTheme: eyeTheme)
+            } else {
+                drawMouse(in: ctx, physics: physics, kbSkin: kbSkin)
+            }
+            drawKeyboard(in: ctx, physics: physics, kbSkin: kbSkin, eyeTheme: eyeTheme, showLegends: showLegends, flipped: flipped, marquee: marquee)
+            ctx.restoreGState()
+        }
+
+        let S: CGFloat = 0.56
+        let gaze = physics.eyeGaze.point
+        let gazeX = max(-1, min(1, gaze.x)) * 4.5 * S
+        let gazeY = max(-1, min(1, gaze.y)) * 3.5 * S
+        let blinking = physics.blinkProgress > 0.55
+        let headTilt = physics.headTilt.value * 0.75
+
+        let drawFace: (CGFloat, CGFloat, String) -> Void = { hx, hy, mode in
+            if mode == "sleep" {
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx - 42 * S, cy: hy + 24 * S, sc: S)
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx + 26 * S, cy: hy + 28 * S, sc: S, flipX: true)
+                drawBeagleSprite(in: ctx, "nose", cx: hx - 12 * S, cy: hy + 46 * S, sc: S)
+                let bubSc = S * (0.88 + 0.18 * sin(t * 2.2))
+                drawBeagleSprite(in: ctx, "bubble", cx: hx + 5 * S, cy: hy + 54 * S, sc: bubSc)
+                return
+            }
+            if blinking && mode != "angry" && mode != "lift" {
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx - 40 * S, cy: hy + 22 * S, sc: S)
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx + 26 * S, cy: hy + 26 * S, sc: S, flipX: true)
+                drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * S, cy: hy + 44 * S, sc: S)
+                return
+            }
+            if mode == "angry" {
+                drawBeagleSprite(in: ctx, "angryFrameR", cx: hx - 38 * S, cy: hy + 18 * S, sc: S)
+                drawBeagleSprite(in: ctx, "angryFrameL", cx: hx + 28 * S, cy: hy + 24 * S, sc: S)
+                drawBeagleSprite(in: ctx, "pupilL", cx: hx - 38 * S + gazeX * 0.6, cy: hy + 22 * S + gazeY * 0.6, sc: S)
+                drawBeagleSprite(in: ctx, "pupilR", cx: hx + 28 * S + gazeX * 0.6, cy: hy + 28 * S + gazeY * 0.6, sc: S)
+                drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * S, cy: hy + 46 * S, sc: S)
+                let pulse: CGFloat = 1.0 + sin(t * 14.0) * 0.10
+                drawBeagleSprite(in: ctx, "angerMark", cx: hx + 36 * S, cy: hy - 44 * S, sc: S * pulse)
+                drawBeagleSprite(in: ctx, "sweat", cx: hx - 44 * S, cy: hy - 36 * S, sc: S)
+                return
+            }
+            drawBeagleSprite(in: ctx, "eyeFrameL", cx: hx - 38 * S, cy: hy + 16 * S, sc: S)
+            drawBeagleSprite(in: ctx, "eyeFrameR", cx: hx + 28 * S, cy: hy + 22 * S, sc: S)
+            drawBeagleSprite(in: ctx, "pupilL", cx: hx - 38 * S + gazeX, cy: hy + 18 * S + gazeY, sc: S)
+            drawBeagleSprite(in: ctx, "pupilR", cx: hx + 28 * S + gazeX, cy: hy + 24 * S + gazeY, sc: S)
+            if mode == "happy" {
+                drawBeagleSprite(in: ctx, "eyeHi", cx: hx - 36 * S + gazeX * 0.5, cy: hy + 12 * S + gazeY * 0.5, sc: S)
+                drawBeagleSprite(in: ctx, "eyeHi", cx: hx + 30 * S + gazeX * 0.5, cy: hy + 18 * S + gazeY * 0.5, sc: S)
+                drawBeagleSprite(in: ctx, "blush", cx: hx - 60 * S, cy: hy + 44 * S, sc: S)
+                drawBeagleSprite(in: ctx, "blush", cx: hx + 42 * S, cy: hy + 48 * S, sc: S)
+            } else if mode == "lift" {
+                drawBeagleSprite(in: ctx, "liftEyeHi", cx: hx - 36 * S + gazeX * 0.4, cy: hy + 16 * S + gazeY * 0.4, sc: S)
+                drawBeagleSprite(in: ctx, "liftEyeHi", cx: hx + 30 * S + gazeX * 0.4, cy: hy + 22 * S + gazeY * 0.4, sc: S)
+                drawBeagleSprite(in: ctx, "sweat", cx: hx - 44 * S, cy: hy - 36 * S, sc: S)
+            }
+            drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * S, cy: hy + 44 * S, sc: S)
+        }
+
+        if scruffS > 0.35 {
+            let swing = max(-0.5, min(0.5, physics.scruffSwing.value))
+            let hx = seatX - 10 + swing * 18
+            let hy = 132 + sin(t * 3.0) * 3.5
+            let wag = sin(t * 11.0) * 0.24
+            let legSwing = sin(t * 7.5) * 0.18 + swing * 0.45
+            ctx.saveGState()
+            ctx.translateBy(x: hx, y: hy)
+            ctx.rotate(by: swing * 0.25)
+            drawBeagleSprite(in: ctx, "liftTail", cx: 124 * S, cy: -34 * S, sc: S, rot: wag)
+            drawBeagleSprite(in: ctx, "liftHindPaw", cx: 82 * S, cy: 86 * S, sc: S, rot: -legSwing * 0.8)
+            drawBeagleSprite(in: ctx, "liftBody", cx: 34 * S, cy: 26 * S, sc: S)
+            drawBeagleSprite(in: ctx, "liftFrontPaw", cx: -52 * S, cy: 92 * S, sc: S, rot: legSwing)
+            drawBeagleSprite(in: ctx, "liftFrontPaw", cx: 18 * S, cy: 100 * S, sc: S, rot: -legSwing * 0.9)
+            drawBeagleSprite(in: ctx, "earL", cx: -74 * S, cy: 12 * S, sc: S, rot: -swing * 0.35 + sin(t * 5.0) * 0.05)
+            drawBeagleSprite(in: ctx, "head", cx: 0, cy: 0, sc: S)
+            drawFace(0, 0, "lift")
+            drawBeagleSprite(in: ctx, "earR", cx: 86 * S, cy: 22 * S, sc: S, rot: -swing * 0.35 - sin(t * 5.0) * 0.05)
+            ctx.restoreGState()
+            if physics.musicIntensity > 0.01 {
+                drawMusicHeadphones(in: ctx, center: CGPoint(x: hx, y: hy), physics: physics, eyeTheme: eyeTheme, skin: skin)
+            }
+            return
+        }
+
+        if sleepS > 0.45 {
+            let hx = seatX - 24
+            let hy = 178 + breath * 0.7
+            let tailWag = sin(t * 1.8) * 0.08
+            drawBeagleSprite(in: ctx, "sleepTail", cx: hx + 158 * S, cy: hy + 44 * S, sc: S, rot: tailWag)
+            drawBeagleSprite(in: ctx, "sleepHindPaw", cx: hx + 104 * S, cy: hy + 68 * S, sc: S)
+            drawBeagleSprite(in: ctx, "sleepBody", cx: hx + 54 * S, cy: hy + 22 * S + breath * 0.35, sc: S)
+            drawBeagleSprite(in: ctx, "sleepEarL", cx: hx - 68 * S, cy: hy + 12 * S, sc: S)
+            drawBeagleSprite(in: ctx, "sleepFrontPaw", cx: hx - 74 * S, cy: hy + 72 * S, sc: S)
+            drawBeagleSprite(in: ctx, "head", cx: hx, cy: hy, sc: S)
+            drawFace(hx, hy, "sleep")
+            drawBeagleSprite(in: ctx, "sleepEarR", cx: hx + 70 * S, cy: hy + 18 * S, sc: S)
+            drawBeagleSprite(in: ctx, "sleepFrontPaw", cx: hx + 18 * S, cy: hy + 74 * S, sc: S)
+            if physics.musicIntensity > 0.01 {
+                drawMusicHeadphones(in: ctx, center: CGPoint(x: hx, y: hy), physics: physics, eyeTheme: eyeTheme, skin: skin)
+            }
+            return
+        }
+
+        let lTap: CGFloat = physics.leftPawTyping ? 1.0 : max(0, min(1, -physics.douniLeftRaise.value))
+        let rTap: CGFloat = physics.rightPawTyping ? 1.0 : max(0, min(1, -physics.douniRightRaise.value))
+        let hx = seatX + physics.headYaw.value * 4.5
+        let hy = 152 + breath * 0.8 + (lTap + rTap) * 2.2
+        let earBob = sin(t * 2.3 - 0.5) * 0.03 + (lTap - rTap) * 0.08
+        let faceMode = anger > 0.32 ? "angry" : (happy > 0.22 ? "happy" : "idle")
+
+        drawBeagleSprite(in: ctx, "body", cx: seatX + 4 * S, cy: hy + 88 * S, sc: S)
+        drawBeagleSprite(in: ctx, "paw", cx: hx - 92 * S, cy: hy + (72 + lTap * 18) * S, sc: S, rot: -lTap * 0.16)
+        ctx.saveGState()
+        ctx.translateBy(x: hx, y: hy)
+        ctx.rotate(by: headTilt)
+        drawBeagleSprite(in: ctx, "earL", cx: -74 * S, cy: 12 * S, sc: S, rot: earBob)
+        drawBeagleSprite(in: ctx, "head", cx: 0, cy: 0, sc: S)
+        drawFace(0, 0, faceMode)
+        drawBeagleSprite(in: ctx, "paw", cx: -6 * S, cy: (96 + rTap * 18) * S, sc: S, rot: rTap * 0.14)
+        drawBeagleSprite(in: ctx, "earR", cx: 86 * S, cy: 22 * S, sc: S, rot: -earBob)
+        ctx.restoreGState()
+        if physics.musicIntensity > 0.01 {
+            drawMusicHeadphones(in: ctx, center: CGPoint(x: hx, y: hy), physics: physics, eyeTheme: eyeTheme, skin: skin)
+        }
+    }
+
     private static func drawDouniScene(
         in ctx: CGContext,
         physics: CatPhysics,
@@ -5677,7 +5960,7 @@ enum CatRenderer {
         headRY: CGFloat
     ) {
         if skin.colorpoint {
-            let seal = (skin.palette.points ?? skin.palette.earOuter).ns
+            let seal = sc(skin.palette.points ?? skin.palette.earOuter, skin)
             drawSoftTaupePatch(in: ctx, center: CGPoint(x: headCX, y: headCY + 4), rx: headRX * 0.56, ry: headRY * 0.64, color: seal)
             return
         }
@@ -5691,7 +5974,7 @@ enum CatRenderer {
                 if idx == 0 { p.move(to: mapped) } else { p.addLine(to: mapped) }
             }
             p.closeSubpath()
-            ctx.setFillColor(region.fill.ns.cgColor)
+            ctx.setFillColor(sc(region.fill, skin).cgColor)
             ctx.addPath(p)
             ctx.fillPath()
         }
@@ -5703,13 +5986,13 @@ enum CatRenderer {
                 if idx == 0 { p.move(to: mapped) } else { p.addLine(to: mapped) }
             }
             if mark.stroke {
-                ctx.setStrokeColor(mark.color.ns.cgColor)
+                ctx.setStrokeColor(sc(mark.color, skin).cgColor)
                 ctx.setLineWidth(max(4.0, mark.width * sy))
                 ctx.addPath(p)
                 ctx.strokePath()
             } else {
                 p.closeSubpath()
-                ctx.setFillColor(mark.color.ns.cgColor)
+                ctx.setFillColor(sc(mark.color, skin).cgColor)
                 ctx.addPath(p)
                 ctx.fillPath()
             }
@@ -5728,7 +6011,7 @@ enum CatRenderer {
                 if idx == 0 { p.move(to: mapped) } else { p.addLine(to: mapped) }
             }
             p.closeSubpath()
-            ctx.setFillColor(region.fill.ns.cgColor)
+            ctx.setFillColor(sc(region.fill, skin).cgColor)
             ctx.addPath(p)
             ctx.fillPath()
         }
@@ -5739,19 +6022,19 @@ enum CatRenderer {
                 if idx == 0 { p.move(to: mapped) } else { p.addLine(to: mapped) }
             }
             if mark.stroke {
-                ctx.setStrokeColor(mark.color.ns.cgColor)
+                ctx.setStrokeColor(sc(mark.color, skin).cgColor)
                 ctx.setLineWidth(max(5.0, mark.width * sy))
                 ctx.addPath(p)
                 ctx.strokePath()
             } else {
                 p.closeSubpath()
-                ctx.setFillColor(mark.color.ns.cgColor)
+                ctx.setFillColor(sc(mark.color, skin).cgColor)
                 ctx.addPath(p)
                 ctx.fillPath()
             }
         }
         if let belly = skin.palette.belly {
-            ctx.setFillColor(belly.ns.withAlphaComponent(0.92).cgColor)
+            ctx.setFillColor(sc(belly, 0.92, skin).cgColor)
             ctx.fillEllipse(in: CGRect(x: bx - 170, y: by + lerp(110, 130, s), width: 290, height: 110))
         }
     }
@@ -7496,9 +7779,10 @@ enum CatRenderer {
         let nw = skin.shape.neckWidth
         let isDazed = (skin.renderStyle == .dazed)
         let isBlackRim = isClassicBlackRim(skin)
+        let srgb = usesSRGB(skin)
         let limbInk = isBlackRim
             ? NSColor(calibratedWhite: 0.94, alpha: 0.28)
-            : (pal.outline?.ns ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.26))
+            : (pal.outline.map { sc($0, skin) } ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.26))
 
         // Build- & shape-adaptive long-cat proportions: sleek stretches into a slim liquid noodle;
         // chubby hangs rounder with a plush pear-shaped tummy and stubbier paws.
@@ -7778,7 +8062,7 @@ enum CatRenderer {
             ctx.saveGState()
             ctx.addPath(g.fill)
             ctx.clip()
-            let cs = CGColorSpaceCreateDeviceRGB()
+            let cs = skinColorSpace(skin)
             if isDazed {
                 let cols = [dazedColor(0xE3C99F), dazedColor(0xC8A77A)] as CFArray
                 if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 1.0]) {
@@ -7786,21 +8070,21 @@ enum CatRenderer {
                 }
             } else if skin.colorpoint {
                 let mid = pal.pointsMid ?? pal.legs
-                let cols = [pal.body.ns.cgColor, pal.body.ns.cgColor, mid.ns.cgColor, pal.paws.ns.cgColor] as CFArray
+                let cols = [sc(pal.body, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
                 if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.20, 0.54, 0.88]) {
                     ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
                 }
             } else if let armSpace = limb.armSpace, let limbGrad = skin.partGradients[armSpace.rawValue] {
-                drawClampedPartGradient(in: ctx, limbGrad, start: limb.root, end: limb.tip)
+                drawClampedPartGradient(in: ctx, limbGrad, start: limb.root, end: limb.tip, srgb: srgb)
             } else if !limb.isBehindBody && pal.legs != pal.body {
-                let cols = [pal.body.ns.cgColor, pal.body.ns.cgColor, pal.legs.ns.cgColor, pal.paws.ns.cgColor] as CFArray
+                let cols = [sc(pal.body, skin).cgColor, sc(pal.body, skin).cgColor, sc(pal.legs, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
                 if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.14, 0.42, 0.82]) {
                     ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
                 }
             } else {
                 let legCol = limb.isBehindBody ? (pal.hindLeg ?? pal.legs) : pal.legs
                 let pawCol = limb.isBehindBody ? (pal.hindPaw ?? pal.paws) : pal.paws
-                let cols = [legCol.ns.cgColor, pawCol.ns.cgColor] as CFArray
+                let cols = [sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
                 if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.22, 0.75]) {
                     ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
                 }
@@ -7821,8 +8105,8 @@ enum CatRenderer {
                     let u = sign * (p.y / 10.0)
                     return CGPoint(x: cx + hx * u, y: cy + hy * u)
                 }
-                for region in skin.regions where region.space == armSpace { drawRegion(in: ctx, region, map: armMap) }
-                for mark in skin.marks where mark.space == armSpace { drawMark(in: ctx, mark, map: armMap) }
+                for region in skin.regions where region.space == armSpace { drawRegion(in: ctx, region, srgb: srgb, map: armMap) }
+                for mark in skin.marks where mark.space == armSpace { drawMark(in: ctx, mark, srgb: srgb, map: armMap) }
             }
             ctx.restoreGState()
 
@@ -7883,7 +8167,7 @@ enum CatRenderer {
         // Optional skin-defined dark outer outline (drawn inside the white sticker border)
         if let customOutline = pal.outline, !isDazed {
             ctx.saveGState()
-            ctx.setStrokeColor(customOutline.ns.cgColor)
+            ctx.setStrokeColor(sc(customOutline, skin).cgColor)
             ctx.setLineWidth(tailW + 2.4)
             ctx.addPath(tailCurvePath)
             ctx.strokePath()
@@ -7900,15 +8184,21 @@ enum CatRenderer {
         // 1. Limp drooping/whipping tail behind the lower body
         ctx.saveGState()
         ctx.setLineCap(.round)
+        if !isBlackRim && pal.outline == nil {
+            ctx.setStrokeColor(NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.16).cgColor)
+            ctx.setLineWidth(tailW + 2.0)
+            ctx.addPath(tailCurvePath)
+            ctx.strokePath()
+        }
         if !isDazed, let tailGrad = skin.partGradients["tail"] {
             let strokedTail = tailCurvePath.copy(strokingWithWidth: tailW, lineCap: .round, lineJoin: .round, miterLimit: 2)
             ctx.saveGState()
             ctx.addPath(strokedTail)
             ctx.clip()
-            drawClampedPartGradient(in: ctx, tailGrad, start: tailPivot, end: tailTip)
+            drawClampedPartGradient(in: ctx, tailGrad, start: tailPivot, end: tailTip, srgb: srgb)
             ctx.restoreGState()
         } else {
-            ctx.setStrokeColor(isDazed ? dazedColor(0x283157) : pal.tail.ns.cgColor)
+            ctx.setStrokeColor(isDazed ? dazedColor(0x283157) : sc(pal.tail, skin).cgColor)
             ctx.setLineWidth(tailW)
             ctx.addPath(tailCurvePath)
             ctx.strokePath()
@@ -7921,7 +8211,7 @@ enum CatRenderer {
                     y: u*u*u*tailPivot.y + 3*u*u*t*tailC1.y + 3*u*t*t*tailC2.y + t*t*t*tailTip.y
                 )
             }
-            ctx.setStrokeColor(stripes.ns.withAlphaComponent(0.42).cgColor)
+            ctx.setStrokeColor(sc(stripes, 0.42, skin).cgColor)
             ctx.setLineWidth(tailW * 0.88)
             ctx.setLineCap(.butt)
             for t0 in [0.24, 0.50, 0.74] as [CGFloat] {
@@ -7932,17 +8222,10 @@ enum CatRenderer {
             ctx.setLineCap(.round)
         }
         if !isDazed, let tipColor = pal.tailTip {
-            ctx.setStrokeColor(tipColor.ns.cgColor)
+            ctx.setStrokeColor(sc(tipColor, skin).cgColor)
             ctx.setLineWidth(tailW * 0.92)
             ctx.move(to: lerpPt(tailC2, tailTip, 0.35))
             ctx.addLine(to: tailTip)
-            ctx.strokePath()
-        }
-        if !isBlackRim && pal.outline == nil {
-            ctx.setStrokeColor(NSColor(calibratedWhite: 0, alpha: 0.16).cgColor)
-            ctx.setLineWidth(1.0)
-            let strokedTail = tailCurvePath.copy(strokingWithWidth: tailW, lineCap: .round, lineJoin: .round, miterLimit: 2)
-            ctx.addPath(strokedTail)
             ctx.strokePath()
         }
         ctx.restoreGState()
@@ -8024,13 +8307,13 @@ enum CatRenderer {
             ctx.restoreGState()
         } else {
             ctx.saveGState()
-            ctx.setFillColor(pal.body.ns.cgColor)
+            ctx.setFillColor(sc(pal.body, skin).cgColor)
             ctx.addPath(longCatPath)
             ctx.fillPath()
             ctx.addPath(longCatPath)
             ctx.clip()
 
-            if let shade = pal.bodyShade, let grad = cachedBodyShadeGradient(body: pal.body, shade: shade) {
+            if let shade = pal.bodyShade, let grad = cachedBodyShadeGradient(body: pal.body, shade: shade, srgb: srgb) {
                 ctx.drawLinearGradient(grad, start: CGPoint(x: headCenter.x, y: headCenter.y - 36),
                                        end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip),
                                        options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
@@ -8041,16 +8324,16 @@ enum CatRenderer {
                 let bodySide = cachedJawSide(head: false, cheekFullness: skin.shape.cheekFullness)
                 ctx.addPath(polyline(bodySide, closed: true, map: headMap))
                 ctx.clip()
-                drawClampedPartGradient(in: ctx, bodyGrad, start: CGPoint(x: headCenter.x, y: headCenter.y + 20), end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip))
+                drawClampedPartGradient(in: ctx, bodyGrad, start: CGPoint(x: headCenter.x, y: headCenter.y + 20), end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip), srgb: srgb)
                 ctx.restoreGState()
             }
 
-            if let headBody = pal.headBody {
+            if let headBody = pal.headBody, headBody != pal.body {
                 ctx.saveGState()
                 let headSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
                 ctx.addPath(polyline(headSide, closed: true, map: headMap))
                 ctx.clip()
-                ctx.setFillColor(headBody.ns.cgColor)
+                ctx.setFillColor(sc(headBody, skin).cgColor)
                 ctx.addPath(longCatPath)
                 ctx.fillPath()
                 ctx.restoreGState()
@@ -8061,14 +8344,14 @@ enum CatRenderer {
                 let headSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
                 ctx.addPath(polyline(headSide, closed: true, map: headMap))
                 ctx.clip()
-                drawClampedPartGradient(in: ctx, headGrad, start: CGPoint(x: headCenter.x, y: headCenter.y - 48), end: CGPoint(x: headCenter.x, y: headCenter.y + 40))
+                drawClampedPartGradient(in: ctx, headGrad, start: CGPoint(x: headCenter.x, y: headCenter.y - 48), end: CGPoint(x: headCenter.x, y: headCenter.y + 40), srgb: srgb)
                 ctx.restoreGState()
             }
 
             // 2.5D Colorpoint face mask (Siamese / Ragdoll)
             if let point = pal.points {
                 let mid = pal.pointsMid ?? point
-                let pointGrads = cachedPointsGradients(point: point, mid: mid)
+                let pointGrads = cachedPointsGradients(point: point, mid: mid, srgb: srgb)
                 ctx.saveGState()
                 ctx.translateBy(x: headCenter.x, y: headCenter.y + 3.0)
                 ctx.scaleBy(x: 1.22 * hs, y: 0.88 * hs)
@@ -8084,7 +8367,7 @@ enum CatRenderer {
                 ctx.saveGState()
                 ctx.addPath(polyline(dragBodySide, closed: true, map: headMap))
                 ctx.clip()
-                drawRegion(in: ctx, region, map: dragBodyMap)
+                drawRegion(in: ctx, region, srgb: srgb, map: dragBodyMap)
                 ctx.restoreGState()
             }
             let dragHeadSide = SkinSpec.jawSide(head: true, cheekFullness: skin.shape.cheekFullness)
@@ -8092,7 +8375,7 @@ enum CatRenderer {
                 ctx.saveGState()
                 ctx.addPath(polyline(dragHeadSide, closed: true, map: headMap))
                 ctx.clip()
-                drawRegion(in: ctx, region, map: region.space == .skull ? skullMap : headMap)
+                drawRegion(in: ctx, region, srgb: srgb, map: region.space == .skull ? skullMap : headMap)
                 ctx.restoreGState()
             }
 
@@ -8103,18 +8386,18 @@ enum CatRenderer {
                     ctx.saveGState()
                     ctx.addPath(polyline(dragBodySide, closed: true, map: headMap))
                     ctx.clip()
-                    drawMark(in: ctx, mark, map: dragBodyMap)
+                    drawMark(in: ctx, mark, srgb: srgb, map: dragBodyMap)
                     ctx.restoreGState()
                 case .skull, .head:
-                    let skipJawClip = (mark.space == .head && (mark.clipToBib || (!mark.stroke && isMilkMark(mark) && mark.points.contains { abs($0.x) > 46 })))
-                    let mapFn = mark.space == .skull ? skullMap : (isMilkMark(mark) ? headWhiteMap : headMap)
+                    let skipJawClip = shouldSkipJawHeadClip(mark)
+                    let mapFn = mark.space == .skull ? skullMap : (usesStarterMilkSurface(skin, mark) ? headWhiteMap : headMap)
                     if skipJawClip {
-                        drawMark(in: ctx, mark, map: mapFn)
+                        drawMark(in: ctx, mark, srgb: srgb, map: mapFn)
                     } else {
                         ctx.saveGState()
                         ctx.addPath(polyline(dragHeadSide, closed: true, map: headMap))
                         ctx.clip()
-                        drawMark(in: ctx, mark, map: mapFn)
+                        drawMark(in: ctx, mark, srgb: srgb, map: mapFn)
                         ctx.restoreGState()
                     }
                 default: break
@@ -8124,7 +8407,7 @@ enum CatRenderer {
 
             if !isBlackRim {
                 ctx.saveGState()
-                ctx.setStrokeColor(pal.outline?.ns.cgColor ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.22).cgColor)
+                ctx.setStrokeColor(pal.outline.map { sc($0, skin).cgColor } ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.22).cgColor)
                 ctx.setLineWidth(pal.outline != nil ? 1.5 : 1.05)
                 ctx.addPath(longCatPath)
                 ctx.strokePath()
@@ -8135,7 +8418,7 @@ enum CatRenderer {
             ctx.saveGState()
             ctx.setStrokeColor(isBlackRim
                 ? NSColor(calibratedWhite: 1.0, alpha: 0.16).cgColor
-                : (pal.outline?.ns.withAlphaComponent(0.45).cgColor ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.16).cgColor))
+                : (pal.outline.map { sc($0, 0.45, skin).cgColor } ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.16).cgColor))
             ctx.setLineWidth(isBlackRim ? 1.05 : 1.0)
             ctx.move(to: CGPoint(x: headCenter.x - cheekHalfW * 0.56, y: headCenter.y + chinY - 2.5 * hs))
             ctx.addQuadCurve(to: CGPoint(x: headCenter.x + cheekHalfW * 0.56, y: headCenter.y + chinY - 2.5 * hs),
