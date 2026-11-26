@@ -1255,6 +1255,7 @@ final class SettingsWindowController: NSWindowController {
     private var fullscreenOverlaySwitch: NSSwitch!
     private var clickThroughSwitch: NSSwitch!
     private var autoHideSwitch: NSSwitch!
+    private var autoHeadphonesSwitch: NSSwitch!
     private var obsHideSwitch: NSSwitch!
     private var autoStartSwitch: NSSwitch!
     private var hourlySwitch: NSSwitch!
@@ -1628,7 +1629,7 @@ final class SettingsWindowController: NSWindowController {
 
         // MARK: Card 3 — Window & System
         addSectionHeader(tr("窗口与系统", "Window & System"))
-        addCard(rows: 8) { card, rh in
+        addCard(rows: 9) { card, rh in
             // Row 0: Fullscreen topmost
             card.addSubview(makeLabel(tr("全屏游戏/应用置顶显示", "Always On Top Over Fullscreen"), yPos: 4, width: 320))
             fullscreenOverlaySwitch = makeSwitch(s.fullScreenOverlay, action: #selector(onToggleFullscreenOverlay), yPos: 4)
@@ -1686,12 +1687,19 @@ final class SettingsWindowController: NSWindowController {
             card.addSubview(hourlySwitch)
             addRowDivider(card, yPos: r6 + rh)
 
-            // Row 7: Language
+            // Row 7: Auto Headphones on Music
             let r7 = 4 + rh * 7
-            card.addSubview(makeLabel("语言 / Language", yPos: r7, width: 180))
+            card.addSubview(makeLabel(tr("听歌自动戴耳机（音乐/媒体播放器）", "Auto Headphones on Music"), yPos: r7, width: 340))
+            autoHeadphonesSwitch = makeSwitch(s.autoHeadphonesOnMusic, action: #selector(onToggleAutoHeadphones), yPos: r7)
+            card.addSubview(autoHeadphonesSwitch)
+            addRowDivider(card, yPos: r7 + rh)
+
+            // Row 8: Language
+            let r8 = 4 + rh * 8
+            card.addSubview(makeLabel("语言 / Language", yPos: r8, width: 180))
             langSeg = NSSegmentedControl(labels: ["简体中文", "English"], trackingMode: .selectOne, target: self, action: #selector(onLangChanged))
             langSeg.selectedSegment = s.isEnglish ? 1 : 0
-            langSeg.frame = NSRect(x: cardW - 14 - 166, y: r7 + 6, width: 166, height: 24)
+            langSeg.frame = NSRect(x: cardW - 14 - 166, y: r8 + 6, width: 166, height: 24)
             card.addSubview(langSeg)
         }
 
@@ -1925,6 +1933,10 @@ final class SettingsWindowController: NSWindowController {
     @objc private func onToggleAutoHide() {
         CatSettings.shared.autoHideFullscreen = (autoHideSwitch.state == .on)
         onAutoHideChanged?()
+    }
+
+    @objc private func onToggleAutoHeadphones() {
+        CatSettings.shared.autoHeadphonesOnMusic = (autoHeadphonesSwitch.state == .on)
     }
 
     @objc private func onOBSSelected() {

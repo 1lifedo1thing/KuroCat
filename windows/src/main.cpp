@@ -22,6 +22,8 @@ using std::max;
 #include <objidl.h>
 #include <gdiplus.h>
 #include <wtsapi32.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -843,12 +845,85 @@ void recoverAfterSystemEvent(AppState& app) {
     app.pendingTopmostTime = now + 1.5; // some games re-assert topmost shortly after a mode switch
 }
 
+/// Returns true when a known music or media player currently owns an active WASAPI audio session.
+static bool isMusicPlayerPlaying() {
+    static const wchar_t* kPlayers[] = {
+        L"cloudmusic.exe", L"qqmusic.exe", L"spotify.exe", L"kugou.exe",
+        L"kwmusic.exe", L"kuwomusic.exe", L"sodamusic.exe", L"qishui.exe",
+        L"applemusic.exe", L"itunes.exe", L"foobar2000.exe", L"musicbee.exe",
+        L"aimp.exe", L"lx-music-desktop.exe", L"yesplaymusic.exe", L"cider.exe",
+        L"potplayermini64.exe", L"potplayermini.exe", L"vlc.exe", L"mpv.exe",
+        L"mpc-hc64.exe", L"mpc-be64.exe", L"wmplayer.exe", L"microsoft.media.player.exe",
+        L"tidal.exe", L"youtube music.exe", L"bilibili.exe", L"listen1.exe",
+        L"zyplayer.exe", L"kodi.exe", L"audacious.exe"
+    };
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+    if (FAILED(hr) || !enumerator) return false;
+    IMMDevice* device = nullptr;
+    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    enumerator->Release();
+    if (FAILED(hr) || !device) return false;
+    IAudioSessionManager2* mgr = nullptr;
+    hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr);
+    device->Release();
+    if (FAILED(hr) || !mgr) return false;
+    IAudioSessionEnumerator* sessionEnum = nullptr;
+    hr = mgr->GetSessionEnumerator(&sessionEnum);
+    mgr->Release();
+    if (FAILED(hr) || !sessionEnum) return false;
+
+    int count = 0;
+    sessionEnum->GetCount(&count);
+    bool found = false;
+    for (int i = 0; i < count && !found; ++i) {
+        IAudioSessionControl* ctrl = nullptr;
+        if (FAILED(sessionEnum->GetSession(i, &ctrl)) || !ctrl) continue;
+        AudioSessionState st = AudioSessionStateInactive;
+        if (SUCCEEDED(ctrl->GetState(&st)) && st == AudioSessionStateActive) {
+            IAudioSessionControl2* ctrl2 = nullptr;
+            if (SUCCEEDED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2)) && ctrl2) {
+                DWORD pid = 0;
+                if (SUCCEEDED(ctrl2->GetProcessId(&pid)) && pid != 0) {
+                    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                    if (hProc) {
+                        wchar_t path[MAX_PATH] = {};
+                        DWORD sz = MAX_PATH;
+                        if (QueryFullProcessImageNameW(hProc, 0, path, &sz) && sz > 0) {
+                            const wchar_t* base = wcsrchr(path, L'\\');
+                            base = base ? base + 1 : path;
+                            for (const wchar_t* p : kPlayers) {
+                                if (_wcsicmp(base, p) == 0) { found = true; break; }
+                            }
+                        }
+                        CloseHandle(hProc);
+                    }
+                }
+                ctrl2->Release();
+            }
+        }
+        ctrl->Release();
+    }
+    sessionEnum->Release();
+    return found;
+}
+
 /// Twice per second: watchdog, fullscreen auto-hide, topmost re-assert, and UIPI detection.
 void housekeeping(AppState& app) {
     double now = nowSeconds();
     if (now < app.nextHousekeepingTime) return;
     app.nextHousekeepingTime = now + 0.5;
     if (!app.hwnd) return;
+
+    // Poll music/media player audio sessions every ~1.2s
+    static double s_nextMusicCheck = 0.0;
+    if (!app.settings.autoHeadphonesOnMusic) {
+        app.physics.isMusicPlaying = false;
+    } else if (now >= s_nextMusicCheck) {
+        s_nextMusicCheck = now + 1.2;
+        app.physics.isMusicPlaying = isMusicPlayerPlaying();
+    }
 
     bool fullscreenFg = isForegroundFullscreen(app.hwnd);
     bool obsBg = (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop);
@@ -1356,18 +1431,27 @@ void showDressingRoom(AppState& app) {
         registered = RegisterClassExW(&wc) != 0;
     }
     HDC screen = GetDC(nullptr);
-    app.dressingScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
+    float dpiScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
     ReleaseDC(nullptr, screen);
-    float k = app.dressingScale;
-    auto px = [&](float v) { return (int)std::lround(v * k); };
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, exStyle = WS_EX_TOPMOST | WS_EX_ACCEPTFILES;
+    RECT frameRc = { 0, 0, 0, 0 };
+    AdjustWindowRectEx(&frameRc, style, FALSE, exStyle);
+    int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
+    RECT work = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int maxClientW = std::max(280, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(240, (int)(work.bottom - work.top) - frameH - 24);
+    float k = std::min({ dpiScale, (float)maxClientW / dressing::W, (float)maxClientH / dressing::H });
+    if (k < 0.65f) k = 0.65f;
+    app.dressingScale = k;
+    auto px = [&](float v) { return (int)std::lround(v * k); };
     RECT rc = {0, 0, px(dressing::W), px(dressing::H)};
     AdjustWindowRectEx(&rc, style, FALSE, exStyle);
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
-    RECT work = {};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int posX = std::max((int)work.left, (int)(work.left + work.right - w) / 2);
+    int posY = std::max((int)work.top, (int)(work.top + work.bottom - h) / 2);
     HWND win = CreateWindowExW(exStyle, DRESSING_ROOM_CLASS, L"换装间", style,
-        (work.left + work.right - w) / 2, (work.top + work.bottom - h) / 2, w, h, nullptr, nullptr, inst, nullptr);
+        posX, posY, w, h, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.dressingRoom = win;
     allowDropsWhenElevated(win);
@@ -1567,6 +1651,7 @@ enum CtrlId : int {
     ID_TABLET_COMBO,
     ID_CHK_TOPMOST,
     ID_CHK_AUTOHIDE_FS,
+    ID_CHK_AUTO_HEADPHONES,
     ID_CHK_CLICKTHROUGH,
     ID_CHK_AUTOSTART,
     ID_CHK_RUN_ADMIN,
@@ -1709,6 +1794,7 @@ void rebuildCombosAndSync(AppState& app) {
     setChk(ID_CHK_LEVEL_KEYBOARD, app.settings.levelKeyboard);
     setChk(ID_CHK_TOPMOST, app.settings.alwaysOnTop);
     setChk(ID_CHK_AUTOHIDE_FS, app.settings.autoHideFullscreen);
+    setChk(ID_CHK_AUTO_HEADPHONES, app.settings.autoHeadphonesOnMusic);
     setChk(ID_CHK_CLICKTHROUGH, app.settings.fullClickThrough);
     setChk(ID_CHK_AUTOSTART, isAutoStartEnabled());
     setChk(ID_CHK_RUN_ADMIN, app.settings.runAsAdmin);
@@ -2059,6 +2145,11 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         }
                         app->nextHousekeepingTime = 0.0;
                         break;
+                    case ID_CHK_AUTO_HEADPHONES:
+                        app->settings.autoHeadphonesOnMusic = isChk(id);
+                        if (!app->settings.autoHeadphonesOnMusic) app->physics.isMusicPlaying = false;
+                        app->settings.saveToRegistry();
+                        break;
                     case ID_CHK_CLICKTHROUGH:
                         app->settings.fullClickThrough = isChk(id);
                         app->settings.saveToRegistry();
@@ -2147,8 +2238,20 @@ void showSettingsWindow(AppState& app) {
     }
 
     HDC screen = GetDC(nullptr);
-    float k = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
+    float dpiScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
     ReleaseDC(nullptr, screen);
+
+    const int W = 540, H = 740;
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    RECT frameRc = { 0, 0, 0, 0 };
+    AdjustWindowRectEx(&frameRc, style, FALSE, 0);
+    int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
+    RECT work = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int maxClientW = std::max(320, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(360, (int)(work.bottom - work.top) - frameH - 24);
+    float k = std::min({ dpiScale, (float)maxClientW / (float)W, (float)maxClientH / (float)H });
+    if (k < 0.65f) k = 0.65f;
     auto px = [&](int v) { return (int)std::lround(v * k); };
 
     app.settingsDark = settings_ui::isWindowsDarkMode();
@@ -2161,16 +2264,14 @@ void showSettingsWindow(AppState& app) {
     bool en = app.settings.isEnglish;
     auto tr = [&](const wchar_t* zh, const wchar_t* eng) -> const wchar_t* { return en ? eng : zh; };
 
-    const int W = 540, H = 710;
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     RECT rc = { 0, 0, px(W), px(H) };
     AdjustWindowRectEx(&rc, style, FALSE, 0);
     int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
-    RECT work = {};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int posX = std::max((int)work.left, (int)(work.left + work.right - winW) / 2);
+    int posY = std::max((int)work.top, (int)(work.top + work.bottom - winH) / 2);
     HWND win = CreateWindowExW(0, SETTINGS_WINDOW_CLASS,
         tr(L"KuroCat \u8BBE\u7F6E", L"KuroCat Settings"), style,
-        (work.left + work.right - winW) / 2, (work.top + work.bottom - winH) / 2,
+        posX, posY,
         winW, winH, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.settingsWnd = win;
@@ -2247,7 +2348,7 @@ void showSettingsWindow(AppState& app) {
     SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse"));
 
     // Section 3: Window & System
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System"), BS_GROUPBOX, 14, 502, 512, 194, 0, true);
+    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System"), BS_GROUPBOX, 14, 502, 512, 224, 0, true);
     addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 528, 236, 22, ID_CHK_TOPMOST);
     addCtrl(L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 528, 236, 22, ID_CHK_AUTOHIDE_FS);
     addCtrl(L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u4E34\u65F6\u89E3\u9501)", L"Full Click-Through (Hold Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 556, 236, 22, ID_CHK_CLICKTHROUGH);
@@ -2256,20 +2357,21 @@ void showSettingsWindow(AppState& app) {
     addCtrl(L"BUTTON", app.isElevated ? tr(L"\u2713 \u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"\u2713 Running as Admin")
                                       : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin"),
             BS_PUSHBUTTON | WS_TABSTOP, 276, 582, 148, 24, ID_BTN_RELAUNCH_ADMIN);
+    addCtrl(L"BUTTON", tr(L"\u542C\u6B4C\u81EA\u52A8\u6234\u8033\u673A\uFF08\u97F3\u4E50/\u5A92\u4F53\u64AD\u653E\u5668\uFF09", L"Auto Headphones on Music"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 612, 340, 22, ID_CHK_AUTO_HEADPHONES);
 
-    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture"), SS_LEFT, 28, 618, 78, 20, 0);
-    HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 614, 210, 120, ID_OBS_COMBO);
+    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture"), SS_LEFT, 28, 646, 78, 20, 0);
+    HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 642, 210, 120, ID_OBS_COMBO);
     SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)"));
     SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3\uFF08\u9700 WGC \u91C7\u96C6\uFF09", L"OBS Transparent (Needs WGC)"));
     SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55\uFF08\u901A\u7528\u517C\u5BB9\uFF0C\u63A8\u8350\u76F4\u64AD\u59EC\uFF09", L"OBS Green Screen (Universal)"));
-    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 616, 180, 22, ID_CHK_OBS_HIDE);
+    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 644, 180, 22, ID_CHK_OBS_HIDE);
 
-    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language"), SS_LEFT, 28, 652, 78, 20, 0);
-    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 648, 150, 90, ID_LANG_COMBO);
+    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language"), SS_LEFT, 28, 680, 78, 20, 0);
+    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 676, 150, 90, ID_LANG_COMBO);
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
-    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), BS_PUSHBUTTON | WS_TABSTOP, 290, 648, 106, 24, ID_BTN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir"), BS_PUSHBUTTON | WS_TABSTOP, 406, 648, 106, 24, ID_BTN_KB_DIR);
+    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), BS_PUSHBUTTON | WS_TABSTOP, 290, 676, 106, 24, ID_BTN_SKINS_DIR);
+    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir"), BS_PUSHBUTTON | WS_TABSTOP, 406, 676, 106, 24, ID_BTN_KB_DIR);
 
     settings_ui::rebuildCombosAndSync(app);
     ShowWindow(win, SW_SHOWNORMAL);

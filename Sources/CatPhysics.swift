@@ -91,6 +91,10 @@ final class CatSettings {
     var autoHideFullscreen: Bool {
         didSet { UserDefaults.standard.set(autoHideFullscreen, forKey: "KuroCat.AutoHideFullscreen") }
     }
+    /// Automatically put on headphones with gentle rhythm & music notes when a music/media player is playing
+    var autoHeadphonesOnMusic: Bool {
+        didSet { UserDefaults.standard.set(autoHeadphonesOnMusic, forKey: "KuroCat.AutoHeadphonesOnMusic") }
+    }
     /// 0 = Auto-detect graphics tablet/stylus, 1 = Always show tablet, 2 = Always show mouse
     var tabletMode: Int {
         didSet { UserDefaults.standard.set(tabletMode, forKey: "KuroCat.TabletMode") }
@@ -209,6 +213,7 @@ final class CatSettings {
         obsCaptureMode = d.object(forKey: "KuroCat.OBSCaptureMode") as? Int ?? 0
         obsHideDesktop = d.object(forKey: "KuroCat.OBSHideDesktop") as? Bool ?? false
         autoHideFullscreen = d.object(forKey: "KuroCat.AutoHideFullscreen") as? Bool ?? false
+        autoHeadphonesOnMusic = d.object(forKey: "KuroCat.AutoHeadphonesOnMusic") as? Bool ?? true
         tabletMode = d.object(forKey: "KuroCat.TabletMode") as? Int ?? 0
         flipHorizontal = d.object(forKey: "KuroCat.FlipHorizontal") as? Bool ?? false
         rotationDeg = CGFloat(d.object(forKey: "KuroCat.RotationDeg") as? Double ?? 0.0)
@@ -459,6 +464,9 @@ final class CatPhysics {
 
     // Sleepy idle state
     private(set) var sleepiness: CGFloat = 0 // 0 = awake, 1 = napping
+    var isMusicPlaying: Bool = false
+    private(set) var musicIntensity: CGFloat = 0 // 0 = no headphones, 1 = wearing headphones & vibing
+    private(set) var musicPhase: CGFloat = 0     // continuous beat phase (~112 BPM)
     private(set) var yawnAmount: CGFloat = 0 // 0 = closed, 1 = peak wide yawn before sleep
     private var yawnTimer: CGFloat = 0
     private(set) var isYawning = false
@@ -1412,12 +1420,29 @@ final class CatPhysics {
         }
 
         // Head turns smoothly in 2.5D (yaw & pitch) — locks on faster during hunting mode!
+        // Music listening blend & gentle rhythm sway/nod
+        let wantMusic: CGFloat = (isMusicPlaying && CatSettings.shared.autoHeadphonesOnMusic) ? 1.0 : 0.0
+        let musicRate: CGFloat = wantMusic > musicIntensity ? 3.2 : 2.0
+        musicIntensity += (wantMusic - musicIntensity) * min(1.0, dt * musicRate)
+        if musicIntensity < 0.002 && wantMusic == 0 { musicIntensity = 0 }
+        if musicIntensity > 0.005 {
+            musicPhase += dt * 5.86 // ~112 BPM half-cycle beat
+            if musicPhase > 6283.18 { musicPhase -= 6283.18 }
+        }
+        let rAwake: CGFloat = 1.0 - min(1.0, sleepiness * 1.1)
+        let rScruff: CGFloat = 1.0 - min(1.0, scruffDrag.value * 1.2)
+        let rDizzy: CGFloat = 1.0 - min(1.0, dizzyIntensity.value * 1.4)
+        let rAnger: CGFloat = 1.0 - min(1.0, angerIntensity.value * 0.8)
+        let musicRhythm: CGFloat = musicIntensity * rAwake * rScruff * rDizzy * rAnger
+        let musicNod = abs(sin(musicPhase)) * 0.14 * musicRhythm
+        let musicSway = sin(musicPhase * 0.5) * 0.068 * musicRhythm
+
         if sleepiness > 0.45 {
             headYaw.target = 0
             headPitch.target = 0.45 * sleepiness * (1.0 - classicSleepBlend)
         } else {
             headYaw.target = max(-1.0, min(1.0, lookTargetX))
-            headPitch.target = max(-1.0, min(1.0, lookTargetY))
+            headPitch.target = max(-1.0, min(1.0, lookTargetY + musicNod))
         }
         let headStiff: CGFloat = 88 + hunt * 75
         let headDamp: CGFloat = 14.5 + hunt * 4.5
@@ -1426,7 +1451,7 @@ final class CatPhysics {
 
         // Subtle natural head roll coupled to head turning (curious tilt / locked-on hunt!)
         if now - lastPetTime > 0.28 {
-            headTilt.target = (bodyTilt.target * 0.45 + headYaw.value * (0.11 + hunt * 0.05) - headYaw.value * headPitch.value * 0.04 + lie * 0.12) * (1.0 - classicSleepBlend)
+            headTilt.target = (bodyTilt.target * 0.45 + headYaw.value * (0.11 + hunt * 0.05) - headYaw.value * headPitch.value * 0.04 + lie * 0.12 + musicSway) * (1.0 - classicSleepBlend)
         }
         headTilt.step(dt: dt, stiffness: 130, damping: 16)
 

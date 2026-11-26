@@ -90,6 +90,7 @@ struct LinuxApp {
     GtkWidget* setTabletCombo = nullptr;
     GtkWidget* setTopmostChk = nullptr;
     GtkWidget* setAutohideChk = nullptr;
+    GtkWidget* setAutoHeadphonesChk = nullptr;
     GtkWidget* setClickThroughChk = nullptr;
     GtkWidget* setAutostartChk = nullptr;
     GtkWidget* setHighFpsChk = nullptr;
@@ -1344,6 +1345,7 @@ static void refreshSettingsWindow(LinuxApp& app) {
     setChk(app.setLevelKeyboardChk, app.settings.levelKeyboard);
     setChk(app.setTopmostChk, app.settings.alwaysOnTop);
     setChk(app.setAutohideChk, app.settings.autoHideFullscreen);
+    setChk(app.setAutoHeadphonesChk, app.settings.autoHeadphonesOnMusic);
     setChk(app.setClickThroughChk, app.settings.fullClickThrough);
     setChk(app.setAutostartChk, isAutoStartEnabled());
     setChk(app.setHighFpsChk, app.settings.highFrameRate);
@@ -1394,8 +1396,19 @@ static void showSettingsWindow() {
 
     GtkWidget* win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(win), tr("KuroCat 设置", "KuroCat Settings"));
-    gtk_window_set_default_size(GTK_WINDOW(win), 500, 620);
-    gtk_window_set_position(GTK_WINDOW(win), GTK_WIN_POS_CENTER);
+    int defW = 500, defH = 620;
+    GdkRectangle wa = { 0, 0, 1280, 800 };
+    if (GdkDisplay* dpy = gdk_display_get_default()) {
+        GdkMonitor* mon = gdk_display_get_primary_monitor(dpy);
+        if (!mon) mon = gdk_display_get_monitor(dpy, 0);
+        if (mon) {
+            gdk_monitor_get_workarea(mon, &wa);
+            defW = std::min(500, std::max(340, wa.width - 40));
+            defH = std::min(620, std::max(340, wa.height - 72));
+        }
+    }
+    gtk_window_set_default_size(GTK_WINDOW(win), defW, defH);
+    gtk_window_move(GTK_WINDOW(win), wa.x + std::max(0, (wa.width - defW) / 2), wa.y + std::max(12, (wa.height - defH) / 2));
     app.settingsWindow = win;
 
     g_signal_connect(win, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) {
@@ -1404,7 +1417,7 @@ static void showSettingsWindow() {
         g_app->setScaleSlider = g_app->setScaleLabel = g_app->setRotSlider = g_app->setRotLabel = nullptr;
         g_app->setFlipChk = g_app->setOutlineChk = g_app->setAngerChk = g_app->setPetChk = nullptr;
         g_app->setBadgesChk = g_app->setMouseBadgesChk = g_app->setLegendsChk = g_app->setMarqueeChk = g_app->setLevelKeyboardChk = g_app->setTypingLimbCombo = nullptr;
-        g_app->setTabletCombo = g_app->setTopmostChk = g_app->setAutohideChk = g_app->setClickThroughChk = nullptr;
+        g_app->setTabletCombo = g_app->setTopmostChk = g_app->setAutohideChk = g_app->setAutoHeadphonesChk = g_app->setClickThroughChk = nullptr;
         g_app->setAutostartChk = g_app->setHighFpsChk = g_app->setObsCombo = g_app->setObsHideChk = g_app->setLangCombo = nullptr;
     }), nullptr);
 
@@ -1782,6 +1795,15 @@ static void showSettingsWindow() {
         }), nullptr);
         gtk_grid_attach(GTK_GRID(g), app.setClickThroughChk, 0, r, 1, 1);
         gtk_grid_attach(GTK_GRID(g), app.setAutostartChk, 1, r++, 2, 1);
+
+        app.setAutoHeadphonesChk = gtk_check_button_new_with_label(tr("听歌自动戴耳机（音乐/媒体播放器）", "Auto Headphones on Music"));
+        g_signal_connect(app.setAutoHeadphonesChk, "toggled", G_CALLBACK(+[](GtkToggleButton* b, gpointer) {
+            if (g_app->settingsUpdating) return;
+            g_app->settings.autoHeadphonesOnMusic = gtk_toggle_button_get_active(b);
+            if (!g_app->settings.autoHeadphonesOnMusic) g_app->physics.isMusicPlaying = false;
+            g_app->settings.save();
+        }), nullptr);
+        gtk_grid_attach(GTK_GRID(g), app.setAutoHeadphonesChk, 0, r++, 3, 1);
 
         app.setHighFpsChk = gtk_check_button_new_with_label(tr("高帧率 60fps（电脑卡顿时请关闭）", "High FPS 60fps"));
         g_signal_connect(app.setHighFpsChk, "toggled", G_CALLBACK(+[](GtkToggleButton* b, gpointer) {
@@ -2243,6 +2265,104 @@ static guint desiredFrameIntervalMs(const LinuxApp& app) {
     return 50;
 }
 
+static bool isX11ShowingDesktop() {
+    GdkDisplay* gdpy = gdk_display_get_default();
+    if (!gdpy || !GDK_IS_X11_DISPLAY(gdpy)) return false;
+    Display* dpy = GDK_DISPLAY_XDISPLAY(gdpy);
+    if (!dpy) return false;
+    static Atom aShowDesk = None;
+    if (aShowDesk == None) aShowDesk = XInternAtom(dpy, "_NET_SHOWING_DESKTOP", True);
+    if (aShowDesk == None) return false;
+    Atom actualType = None;
+    int actualFormat = 0;
+    unsigned long nItems = 0, bytesAfter = 0;
+    unsigned char* prop = nullptr;
+    bool showing = false;
+    if (XGetWindowProperty(dpy, DefaultRootWindow(dpy), aShowDesk, 0, 1, False, XA_CARDINAL,
+                           &actualType, &actualFormat, &nItems, &bytesAfter, &prop) == Success && prop) {
+        if (nItems >= 1 && *(unsigned long*)prop != 0) showing = true;
+        XFree(prop);
+    }
+    return showing;
+}
+
+static void keepPetVisibleOnShowDesktop(LinuxApp& app) {
+    if (!app.window || !app.isVisible || app.hiddenByFullscreen) return;
+    if (!app.settings.alwaysOnTop || app.settings.obsCaptureMode > 0) return;
+    GdkWindow* gw = gtk_widget_get_window(app.window);
+    if (!gw) return;
+    GdkWindowState st = gdk_window_get_state(gw);
+    bool iconified = (st & GDK_WINDOW_STATE_ICONIFIED) != 0;
+    bool withdrawn = (st & GDK_WINDOW_STATE_WITHDRAWN) != 0;
+    bool notAbove = (st & GDK_WINDOW_STATE_ABOVE) == 0;
+    if (iconified || withdrawn || notAbove || isX11ShowingDesktop()) {
+        if (withdrawn) gtk_widget_show(app.window);
+        if (iconified) gtk_window_deiconify(GTK_WINDOW(app.window));
+        gtk_window_set_keep_above(GTK_WINDOW(app.window), TRUE);
+        gdk_window_raise(gw);
+    }
+}
+
+static gboolean onWindowStateEvent(GtkWidget*, GdkEventWindowState* ev, gpointer) {
+    if (!g_app || !ev) return FALSE;
+    if (g_app->isVisible && !g_app->hiddenByFullscreen && g_app->settings.alwaysOnTop && g_app->settings.obsCaptureMode == 0) {
+        if ((ev->new_window_state & GDK_WINDOW_STATE_ICONIFIED) != 0) {
+            // Kylin/UKUI Win+D or "Show Desktop" + clicking desktop minimizes UTILITY windows;
+            // restore immediately so the desktop pet never vanishes.
+            gtk_window_deiconify(GTK_WINDOW(g_app->window));
+            gtk_window_set_keep_above(GTK_WINDOW(g_app->window), TRUE);
+            if (GdkWindow* gw = gtk_widget_get_window(g_app->window)) gdk_window_raise(gw);
+        }
+    }
+    return FALSE;
+}
+
+static bool isMprisMusicPlaying() {
+    static GDBusConnection* bus = nullptr;
+    if (!bus) {
+        GError* err = nullptr;
+        bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &err);
+        if (err) { g_error_free(err); return false; }
+        if (!bus) return false;
+    }
+    GError* err = nullptr;
+    GVariant* namesVar = g_dbus_connection_call_sync(
+        bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+        "ListNames", nullptr, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, 80, nullptr, &err);
+    if (err) { g_error_free(err); return false; }
+    if (!namesVar) return false;
+
+    bool playing = false;
+    GVariantIter* iter = nullptr;
+    g_variant_get(namesVar, "(as)", &iter);
+    const gchar* name = nullptr;
+    while (iter && g_variant_iter_loop(iter, "&s", &name)) {
+        if (playing) continue;
+        if (!name || std::strncmp(name, "org.mpris.MediaPlayer2.", 23) != 0) continue;
+        GError* pErr = nullptr;
+        GVariant* prop = g_dbus_connection_call_sync(
+            bus, name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "Get",
+            g_variant_new("(ss)", "org.mpris.MediaPlayer2.Player", "PlaybackStatus"),
+            G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 60, nullptr, &pErr);
+        if (pErr) { g_error_free(pErr); continue; }
+        if (prop) {
+            GVariant* inner = nullptr;
+            g_variant_get(prop, "(v)", &inner);
+            if (inner) {
+                if (g_variant_is_of_type(inner, G_VARIANT_TYPE_STRING)) {
+                    const gchar* status = g_variant_get_string(inner, nullptr);
+                    if (status && std::strcmp(status, "Playing") == 0) playing = true;
+                }
+                g_variant_unref(inner);
+            }
+            g_variant_unref(prop);
+        }
+    }
+    if (iter) g_variant_iter_free(iter);
+    g_variant_unref(namesVar);
+    return playing;
+}
+
 static gboolean onFrameTick(gpointer);
 
 static void scheduleFrames(guint intervalMs) {
@@ -2282,6 +2402,14 @@ static gboolean onFrameTick(gpointer) {
                 if (g_app->settings.alwaysOnTop) gtk_window_set_keep_above(GTK_WINDOW(g_app->window), TRUE);
                 g_app->lastTickTime = now;
             }
+        }
+        keepPetVisibleOnShowDesktop(*g_app);
+        static double s_nextMusicCheck = 0.0;
+        if (!g_app->settings.autoHeadphonesOnMusic) {
+            g_app->physics.isMusicPlaying = false;
+        } else if (now >= s_nextMusicCheck) {
+            s_nextMusicCheck = now + 1.2;
+            g_app->physics.isMusicPlaying = isMprisMusicPlaying();
         }
     }
     if (g_app->hiddenByFullscreen) {
@@ -2507,6 +2635,7 @@ int main(int argc, char** argv) {
     g_signal_connect(app.window, "motion-notify-event", G_CALLBACK(onMotionNotify), nullptr);
     g_signal_connect(app.window, "button-release-event", G_CALLBACK(onButtonRelease), nullptr);
     g_signal_connect(app.window, "scroll-event", G_CALLBACK(onScrollEvent), nullptr);
+    g_signal_connect(app.window, "window-state-event", G_CALLBACK(onWindowStateEvent), nullptr);
     app.zoomGesture = gtk_gesture_zoom_new(app.window);
     g_signal_connect(app.zoomGesture, "begin", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer) {
         if (g_app) g_app->pinchStartScale = g_app->settings.scale;

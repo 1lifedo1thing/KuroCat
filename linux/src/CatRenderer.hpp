@@ -617,7 +617,7 @@ private:
         if (mark.brush == SkinBrush::Airbrush) {
             std::vector<Pt> mapped;
             mapped.reserve(mark.points.size());
-            for (const SkinPoint& pt : mark.points) mapped.push_back(map(pt));
+            for (const SkinPoint& pt : mark.points) { auto q = map(pt); mapped.push_back(Pt{(float)q.x, (float)q.y}); }
             double radius = std::max(2.2, baseW * 1.15);
             double stepDist = std::max(1.4, radius * 0.34);
             auto stamp = [&](double x, double y) {
@@ -2185,12 +2185,14 @@ private:
                         cairo_restore(cr);
                     } else if (m.space == SkinSpace::Skull || m.space == SkinSpace::Head) {
                         if (shouldSkipJawHeadClip(m)) {
-                            drawMark(cr, m, m.space == SkinSpace::Skull ? skullMap : headMap);
+                            if (m.space == SkinSpace::Skull) drawMark(cr, m, skullMap);
+                            else drawMark(cr, m, headMap);
                         } else {
                             cairo_save(cr);
                             jawSide(cr, true, skin, headCenter, physics);
                             cairo_clip(cr);
-                            drawMark(cr, m, m.space == SkinSpace::Skull ? skullMap : headMap);
+                            if (m.space == SkinSpace::Skull) drawMark(cr, m, skullMap);
+                            else drawMark(cr, m, headMap);
                             cairo_restore(cr);
                         }
                     }

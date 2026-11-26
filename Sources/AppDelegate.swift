@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CoreAudio
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum RenderCadence {
@@ -36,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var renderCadence: RenderCadence = .paused
     private var windowWatchdogTimer: Timer?
     private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
+    private var lastMusicCheckTime: CFTimeInterval = 0
+    private var musicAudioSustainedSince: CFTimeInterval = 0
+    private var cachedMusicPlaying: Bool = false
+    private let musicCheckQueue = DispatchQueue(label: "com.kurocat.musiccheck", qos: .utility)
     private var lastFullscreenCheckTime: CFTimeInterval = 0
     private var hiddenByFullscreen = false
     private var screensAsleep = false
@@ -283,6 +288,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return hiddenByFullscreen
     }
 
+    private static let mediaPlayerBundleIDs: Set<String> = [
+        "com.apple.Music", "com.apple.iTunes", "com.apple.QuickTimePlayerX",
+        "com.spotify.client", "com.netease.163music", "com.tencent.QQMusicMac",
+        "com.kugou.mac", "com.kuwo.mac", "com.luna.music", "com.soda.music",
+        "com.colliderli.iina", "org.videolan.vlc", "io.mpv",
+        "com.qier222.YesPlayMusic", "cn.toside.music.desktop",
+        "com.tidal.desktop", "com.github.th-ch.youtube-music",
+        "com.audirvana.Audirvana-Studio", "com.coppertino.Vox", "com.swinsian.Swinsian",
+        "com.bilibili.bilibili-desktop", "tv.danmaku.bili", "com.cider.client"
+    ]
+
+    private static func isDefaultAudioOutputRunning() -> Bool {
+        var devID = AudioObjectID(kAudioObjectUnknown)
+        var propSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var devAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &devAddr, 0, nil, &propSize, &devID) == noErr,
+              devID != kAudioObjectUnknown else {
+            return false
+        }
+        var running: UInt32 = 0
+        var runSize = UInt32(MemoryLayout<UInt32>.size)
+        var runAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(devID, &runAddr, 0, nil, &runSize, &running) == noErr else {
+            return false
+        }
+        return running != 0
+    }
+
+    private static func hasRunningMediaPlayerApp() -> Bool {
+        for app in NSWorkspace.shared.runningApplications {
+            if let bid = app.bundleIdentifier, mediaPlayerBundleIDs.contains(bid) {
+                return true
+            }
+            if let name = app.localizedName?.lowercased() {
+                if name.contains("music") || name.contains("spotify") || name.contains("网易云") ||
+                   name.contains("qq音乐") || name.contains("汽水音乐") || name.contains("酷狗") ||
+                   name.contains("酷我") || name.contains("iina") || name.contains("vlc") || name == "mpv" {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func pollMusicStateIfNeeded(now: CFTimeInterval) {
+        guard CatSettings.shared.autoHeadphonesOnMusic else {
+            if cachedMusicPlaying {
+                cachedMusicPlaying = false
+                overlayWindow.catView.physics.isMusicPlaying = false
+            }
+            return
+        }
+        if now - lastMusicCheckTime < 1.2 { return }
+        lastMusicCheckTime = now
+
+        musicCheckQueue.async { [weak self] in
+            guard let self = self else { return }
+            let audioRunning = Self.isDefaultAudioOutputRunning()
+            DispatchQueue.main.async {
+                let playing: Bool
+                if audioRunning && Self.hasRunningMediaPlayerApp() {
+                    if self.musicAudioSustainedSince == 0 {
+                        self.musicAudioSustainedSince = now
+                    }
+                    // Require >= 1.2s continuous playback to ignore brief UI/notification dings
+                    playing = (now - self.musicAudioSustainedSince) >= 1.2
+                } else {
+                    self.musicAudioSustainedSince = 0
+                    playing = false
+                }
+                self.cachedMusicPlaying = playing
+                self.overlayWindow.catView.physics.isMusicPlaying = playing
+            }
+        }
+    }
+
     private func renderTick() {
         guard isPetVisible, !screensAsleep else {
             configureRenderTimer(for: .paused)
@@ -293,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             configureRenderTimer(for: .fullscreenHidden)
             return
         }
+        pollMusicStateIfNeeded(now: now)
 
         let dt = CGFloat(now - lastFrameTime)
         lastFrameTime = now
