@@ -2351,14 +2351,12 @@ private:
         GraphicsState st = g.Save();
         g.TranslateTransform(center.x, center.y);
 
-        // Upper-narrow, lower-wide rounded inverted-triangle / pear-teardrop yawn contour
+        // Wide upper lip, narrower rounded lower jaw — true inverted-triangle (▼) cute cat yawn
         GraphicsPath mouth;
-        mouth.AddBezier(0.0f, -ry * 0.92f, rx * 0.34f, -ry * 0.92f, rx * 0.52f, -ry * 0.50f, rx * 0.68f, -ry * 0.12f);
-        mouth.AddBezier(rx * 0.68f, -ry * 0.12f, rx * 0.86f, ry * 0.16f, rx * 1.06f, ry * 0.20f, rx * 1.02f, ry * 0.46f);
-        mouth.AddBezier(rx * 1.02f, ry * 0.46f, rx * 0.98f, ry * 0.78f, rx * 0.48f, ry, 0.0f, ry);
-        mouth.AddBezier(0.0f, ry, -rx * 0.48f, ry, -rx * 0.98f, ry * 0.78f, -rx * 1.02f, ry * 0.46f);
-        mouth.AddBezier(-rx * 1.02f, ry * 0.46f, -rx * 1.06f, ry * 0.20f, -rx * 0.86f, ry * 0.16f, -rx * 0.68f, -ry * 0.12f);
-        mouth.AddBezier(-rx * 0.68f, -ry * 0.12f, -rx * 0.52f, -ry * 0.50f, -rx * 0.34f, -ry * 0.92f, 0.0f, -ry * 0.92f);
+        mouth.AddBezier(0.0f, -ry * 0.86f, rx * 0.62f, -ry * 0.88f, rx * 1.06f, -ry * 0.64f, rx * 0.96f, -ry * 0.18f);
+        mouth.AddBezier(rx * 0.96f, -ry * 0.18f, rx * 0.84f, ry * 0.34f, rx * 0.42f, ry * 0.96f, 0.0f, ry * 1.02f);
+        mouth.AddBezier(0.0f, ry * 1.02f, -rx * 0.42f, ry * 0.96f, -rx * 0.84f, ry * 0.34f, -rx * 0.96f, -ry * 0.18f);
+        mouth.AddBezier(-rx * 0.96f, -ry * 0.18f, -rx * 1.06f, -ry * 0.64f, -rx * 0.62f, -ry * 0.88f, 0.0f, -ry * 0.86f);
         mouth.CloseFigure();
 
         SolidBrush bgBrush(Color(250, 194, 46, 61));

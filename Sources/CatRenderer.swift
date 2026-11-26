@@ -3300,15 +3300,13 @@ enum CatRenderer {
         ctx.saveGState()
         ctx.translateBy(x: center.x, y: center.y)
 
-        // Upper-narrow, lower-wide rounded inverted-triangle / pear-teardrop yawn contour
+        // Wide upper lip, narrower rounded lower jaw — true inverted-triangle (▼) cute cat yawn
         let mouth = CGMutablePath()
-        mouth.move(to: CGPoint(x: 0, y: -ry * 0.92))
-        mouth.addCurve(to: CGPoint(x: rx * 0.68, y: -ry * 0.12), control1: CGPoint(x: rx * 0.34, y: -ry * 0.92), control2: CGPoint(x: rx * 0.52, y: -ry * 0.50))
-        mouth.addCurve(to: CGPoint(x: rx * 1.02, y: ry * 0.46), control1: CGPoint(x: rx * 0.86, y: ry * 0.16), control2: CGPoint(x: rx * 1.06, y: ry * 0.20))
-        mouth.addCurve(to: CGPoint(x: 0, y: ry), control1: CGPoint(x: rx * 0.98, y: ry * 0.78), control2: CGPoint(x: rx * 0.48, y: ry))
-        mouth.addCurve(to: CGPoint(x: -rx * 1.02, y: ry * 0.46), control1: CGPoint(x: -rx * 0.48, y: ry), control2: CGPoint(x: -rx * 0.98, y: ry * 0.78))
-        mouth.addCurve(to: CGPoint(x: -rx * 0.68, y: -ry * 0.12), control1: CGPoint(x: -rx * 1.06, y: ry * 0.20), control2: CGPoint(x: -rx * 0.86, y: ry * 0.16))
-        mouth.addCurve(to: CGPoint(x: 0, y: -ry * 0.92), control1: CGPoint(x: -rx * 0.52, y: -ry * 0.50), control2: CGPoint(x: -rx * 0.34, y: -ry * 0.92))
+        mouth.move(to: CGPoint(x: 0, y: -ry * 0.86))
+        mouth.addCurve(to: CGPoint(x: rx * 0.96, y: -ry * 0.18), control1: CGPoint(x: rx * 0.62, y: -ry * 0.88), control2: CGPoint(x: rx * 1.06, y: -ry * 0.64))
+        mouth.addCurve(to: CGPoint(x: 0, y: ry * 1.02), control1: CGPoint(x: rx * 0.84, y: ry * 0.34), control2: CGPoint(x: rx * 0.42, y: ry * 0.96))
+        mouth.addCurve(to: CGPoint(x: -rx * 0.96, y: -ry * 0.18), control1: CGPoint(x: -rx * 0.42, y: ry * 0.96), control2: CGPoint(x: -rx * 0.84, y: ry * 0.34))
+        mouth.addCurve(to: CGPoint(x: 0, y: -ry * 0.86), control1: CGPoint(x: -rx * 1.06, y: -ry * 0.64), control2: CGPoint(x: -rx * 0.62, y: -ry * 0.88))
         mouth.closeSubpath()
 
         ctx.setFillColor(NSColor(calibratedRed: 0.76, green: 0.18, blue: 0.24, alpha: 0.98).cgColor)

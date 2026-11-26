@@ -2486,16 +2486,14 @@ private:
         double rx = 3.0 + y * 6.2;
         double ry = 1.6 + y * 8.2;
 
-        // Upper-narrow, lower-wide rounded inverted-triangle / pear-teardrop yawn contour
+        // Wide upper lip, narrower rounded lower jaw — true inverted-triangle (▼) cute cat yawn
         auto mouthPath = [&]() {
             cairo_new_path(cr);
-            cairo_move_to(cr, 0.0, -ry * 0.92);
-            cairo_curve_to(cr, rx * 0.34, -ry * 0.92, rx * 0.52, -ry * 0.50, rx * 0.68, -ry * 0.12);
-            cairo_curve_to(cr, rx * 0.86, ry * 0.16, rx * 1.06, ry * 0.20, rx * 1.02, ry * 0.46);
-            cairo_curve_to(cr, rx * 0.98, ry * 0.78, rx * 0.48, ry, 0.0, ry);
-            cairo_curve_to(cr, -rx * 0.48, ry, -rx * 0.98, ry * 0.78, -rx * 1.02, ry * 0.46);
-            cairo_curve_to(cr, -rx * 1.06, ry * 0.20, -rx * 0.86, ry * 0.16, -rx * 0.68, -ry * 0.12);
-            cairo_curve_to(cr, -rx * 0.52, -ry * 0.50, -rx * 0.34, -ry * 0.92, 0.0, -ry * 0.92);
+            cairo_move_to(cr, 0.0, -ry * 0.86);
+            cairo_curve_to(cr, rx * 0.62, -ry * 0.88, rx * 1.06, -ry * 0.64, rx * 0.96, -ry * 0.18);
+            cairo_curve_to(cr, rx * 0.84, ry * 0.34, rx * 0.42, ry * 0.96, 0.0, ry * 1.02);
+            cairo_curve_to(cr, -rx * 0.42, ry * 0.96, -rx * 0.84, ry * 0.34, -rx * 0.96, -ry * 0.18);
+            cairo_curve_to(cr, -rx * 1.06, -ry * 0.64, -rx * 0.62, -ry * 0.88, 0.0, -ry * 0.86);
             cairo_close_path(cr);
         };
 
