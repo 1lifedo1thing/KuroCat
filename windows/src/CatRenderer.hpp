@@ -349,6 +349,11 @@ public:
                             anchorBit(SkinAnchorPoint::Face) | anchorBit(SkinAnchorPoint::HeadTop));
         }
 
+        // 8c. Auto-worn 2.5D headphones & floating music notes when listening to music/media
+        if (physics.musicIntensity > 0.01f) {
+            drawMusicHeadphones(g, headCenter, physics, settings.eyeTheme, skin);
+        }
+
         if (tailInFront) {
             drawTail(g, seatX, seatY, physics, skin);
             if (!skin.decorations.empty()) {
@@ -1848,13 +1853,15 @@ private:
                         g.Restore(msState);
                     } else if (m.space == SkinSpace::Skull || m.space == SkinSpace::Head) {
                         if (shouldSkipJawHeadClip(m)) {
-                            drawMark(g, m, m.space == SkinSpace::Skull ? skullMap : headMap);
+                            if (m.space == SkinSpace::Skull) drawMark(g, m, skullMap);
+                            else drawMark(g, m, headMap);
                         } else {
                             GraphicsState hsState = g.Save();
                             GraphicsPath headSide;
                             jawSide(headSide, true, skin, headCenter, physics);
                             g.SetClip(&headSide, CombineModeIntersect);
-                            drawMark(g, m, m.space == SkinSpace::Skull ? skullMap : headMap);
+                            if (m.space == SkinSpace::Skull) drawMark(g, m, skullMap);
+                            else drawMark(g, m, headMap);
                             g.Restore(hsState);
                         }
                     }
@@ -2055,6 +2062,99 @@ private:
     }
 
     // MARK: - 2.5D Eyes & Whiskers
+
+    static void drawMusicHeadphones(Gdiplus::Graphics& g, Pt center, const CatPhysics& physics, EyeColorTheme eyeTheme, const SkinSpec& skin) {
+        using namespace Gdiplus;
+        float t = std::clamp(physics.musicIntensity, 0.0f, 1.0f);
+        float pop = t * t * (3.0f - 2.0f * t);
+        if (pop < 0.01f) return;
+
+        GraphicsState st = g.Save();
+        g.TranslateTransform(center.x, center.y + (1.0f - pop) * -14.0f);
+        g.RotateTransform(physics.headTilt.value * 57.29578f);
+        float hs = skin.shape.headScale;
+        if (hs != 1.0f) g.ScaleTransform(hs, hs);
+
+        float cf = skin.shape.cheekFullness;
+        float yawShift = physics.headYaw.value * 2.5f;
+        float earX = 43.0f * cf;
+        float earY = 2.0f;
+        float crownY = -36.5f;
+        float beatPulse = 0.72f + 0.28f * std::fabs(std::sin(physics.musicPhase));
+        Color eyeC = eyePrimary(eyeTheme);
+        auto mkCol = [&](BYTE r, BYTE gr, BYTE b, float a) {
+            return Color((BYTE)std::clamp((int)std::lround(a * pop * 255.0f), 0, 255), r, gr, b);
+        };
+
+        // 1. Over-head arch band
+        GraphicsPath band;
+        band.AddBezier(
+            PointF(-earX + yawShift * 0.4f, earY - 4.0f),
+            PointF(-earX * 0.94f + yawShift * 0.2f, crownY - 7.5f),
+            PointF( earX * 0.94f + yawShift * 0.2f, crownY - 7.5f),
+            PointF( earX + yawShift * 0.4f, earY - 4.0f));
+        Pen bandPen(mkCol(41, 44, 54, 0.98f), 6.2f);
+        bandPen.SetStartCap(LineCapRound); bandPen.SetEndCap(LineCapRound);
+        g.DrawPath(&bandPen, &band);
+
+        Pen hiPen(mkCol(255, 255, 255, 0.22f), 1.6f);
+        hiPen.SetStartCap(LineCapRound); hiPen.SetEndCap(LineCapRound);
+        g.DrawPath(&hiPen, &band);
+
+        // 2. Left & right cushioned over-ear cups
+        for (float side : { -1.0f, 1.0f }) {
+            GraphicsState cs = g.Save();
+            g.TranslateTransform(side * earX + yawShift * 0.55f, earY);
+            g.RotateTransform(side * -5.7f);
+            SolidBrush padBr(mkCol(26, 28, 36, 0.96f));
+            g.FillEllipse(&padBr, -side * 1.5f - 5.2f, -12.0f, 10.4f, 24.0f);
+            SolidBrush shellBr(mkCol(54, 59, 72, 0.99f));
+            g.FillEllipse(&shellBr, side * 2.0f - 6.6f, -13.2f, 13.2f, 26.4f);
+            Pen ringPen(mkCol(eyeC.GetR(), eyeC.GetG(), eyeC.GetB(), 0.88f * beatPulse), 1.7f);
+            g.DrawEllipse(&ringPen, side * 2.4f - 4.0f, -8.2f, 8.0f, 16.4f);
+            g.Restore(cs);
+        }
+
+        // 3. Floating vector musical notes
+        struct NoteCfg { float side; float off; bool dbl; };
+        const NoteCfg notes[3] = { { -1.0f, 0.00f, false }, { 1.0f, 0.36f, true }, { -1.0f, 0.68f, true } };
+        for (const NoteCfg& nc : notes) {
+            float raw = std::fmod(physics.musicPhase * 0.14f + nc.off, 1.0f);
+            float cyc = raw < 0.0f ? raw + 1.0f : raw;
+            float fadeIn = std::min(1.0f, cyc / 0.18f);
+            float fadeOut = std::min(1.0f, (1.0f - cyc) / 0.26f);
+            float alpha = fadeIn * fadeOut * 0.92f;
+            if (alpha < 0.03f) continue;
+            float nx = nc.side * (earX + 10.0f) + std::sin(cyc * 6.2832f + nc.off * 4.0f) * 5.5f;
+            float ny = earY - 12.0f - cyc * 44.0f;
+            float nScale = 0.78f + 0.28f * std::sin(cyc * 3.1416f);
+
+            GraphicsState ns = g.Save();
+            g.TranslateTransform(nx, ny);
+            g.ScaleTransform(nScale, nScale);
+            for (int pass = 0; pass < 2; ++pass) {
+                GraphicsState ps = g.Save();
+                if (pass == 0) g.TranslateTransform(0.8f, 1.0f);
+                Color c = pass == 0 ? mkCol(26, 28, 38, alpha * 0.65f) : mkCol(eyeC.GetR(), eyeC.GetG(), eyeC.GetB(), alpha);
+                SolidBrush br(c);
+                Pen pen(c, 1.6f);
+                pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound); pen.SetLineJoin(LineJoinRound);
+                g.FillEllipse(&br, -3.2f, -2.2f, 5.2f, 3.8f);
+                if (nc.dbl) {
+                    PointF pts[4] = { { 1.6f, -0.6f }, { 1.6f, -11.5f }, { 8.4f, -13.2f }, { 8.4f, -2.4f } };
+                    g.DrawLines(&pen, pts, 4);
+                    g.FillEllipse(&br, 3.6f, -4.0f, 5.2f, 3.8f);
+                } else {
+                    g.DrawLine(&pen, 1.6f, -0.6f, 1.6f, -11.5f);
+                    g.DrawBezier(&pen, 1.6f, -11.5f, 4.4f, -11.0f, 6.0f, -9.4f, 6.2f, -7.5f);
+                }
+                g.Restore(ps);
+            }
+            g.Restore(ns);
+        }
+
+        g.Restore(st);
+    }
 
     static void drawHeadFeatures(Gdiplus::Graphics& g, Pt center, const CatPhysics& physics, EyeColorTheme eyeTheme, const SkinSpec& skin,
                                  float scruffStartle = 0.0f, float scruffWide = 0.0f, bool overrideSkinIris = false) {

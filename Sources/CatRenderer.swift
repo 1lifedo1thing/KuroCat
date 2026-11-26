@@ -536,6 +536,11 @@ enum CatRenderer {
             drawDecorations(in: ctx, seatX: seatX, seatY: seatY, head: localHeadCenter, physics: physics, skin: skin, anchors: [.face, .headTop])
         }
 
+        // 8c. Auto-worn 2.5D headphones & floating music notes when listening to music/media
+        if physics.musicIntensity > 0.01 {
+            drawMusicHeadphones(in: ctx, center: localHeadCenter, physics: physics, eyeTheme: eyeTheme, skin: skin)
+        }
+
         if tailInFront {
             drawTail(in: ctx, seatX: seatX, seatY: seatY, physics: physics, skin: skin)
             if !skin.decorations.isEmpty {
@@ -3069,6 +3074,127 @@ enum CatRenderer {
     }
 
     // MARK: - 2.5D Head Features (Luminous Eyes & Whiskers)
+
+    private static func drawMusicHeadphones(
+        in ctx: CGContext,
+        center: CGPoint,
+        physics: CatPhysics,
+        eyeTheme: EyeColorTheme,
+        skin: SkinSpec
+    ) {
+        let t = max(0, min(1, physics.musicIntensity))
+        let pop = t * t * (3.0 - 2.0 * t)
+        if pop < 0.01 { return }
+
+        ctx.saveGState()
+        ctx.translateBy(x: center.x, y: center.y + (1.0 - pop) * -14.0)
+        ctx.rotate(by: physics.headTilt.value)
+        let hs = skin.shape.headScale
+        if hs != 1 { ctx.scaleBy(x: hs, y: hs) }
+        ctx.setAlpha(pop)
+
+        let cf = skin.shape.cheekFullness
+        let yawShift = physics.headYaw.value * 2.5
+        let earX = 43.0 * cf
+        let earY: CGFloat = 2.0
+        let crownY: CGFloat = -36.5
+        let beatPulse: CGFloat = 0.72 + 0.28 * abs(sin(physics.musicPhase))
+        let accent = eyeTheme.primaryColor.usingColorSpace(.sRGB) ?? NSColor(srgbRed: 0.79, green: 0.95, blue: 0.25, alpha: 1.0)
+        let ar = accent.redComponent, ag = accent.greenComponent, ab = accent.blueComponent
+
+        // 1. Over-head arch band
+        let band = CGMutablePath()
+        band.move(to: CGPoint(x: -earX + yawShift * 0.4, y: earY - 4.0))
+        band.addCurve(to: CGPoint(x: earX + yawShift * 0.4, y: earY - 4.0),
+                      control1: CGPoint(x: -earX * 0.94 + yawShift * 0.2, y: crownY - 7.5),
+                      control2: CGPoint(x: earX * 0.94 + yawShift * 0.2, y: crownY - 7.5))
+        ctx.setLineCap(.round)
+        ctx.setStrokeColor(NSColor(srgbRed: 0.16, green: 0.17, blue: 0.21, alpha: 0.98).cgColor)
+        ctx.setLineWidth(6.2)
+        ctx.addPath(band)
+        ctx.strokePath()
+
+        // Specular highlight along top of headband
+        ctx.setStrokeColor(NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.22).cgColor)
+        ctx.setLineWidth(1.6)
+        ctx.addPath(band)
+        ctx.strokePath()
+
+        // 2. Left & right cushioned over-ear cups
+        for side in [-1.0, 1.0] as [CGFloat] {
+            let cx = side * earX + yawShift * 0.55
+            let cy = earY
+            let tilt = side * -0.10
+            ctx.saveGState()
+            ctx.translateBy(x: cx, y: cy)
+            ctx.rotate(by: tilt)
+
+            // Soft inner ear cushion
+            ctx.setFillColor(NSColor(srgbRed: 0.10, green: 0.11, blue: 0.14, alpha: 0.96).cgColor)
+            ctx.fillEllipse(in: CGRect(x: -side * 1.5 - 5.2, y: -12.0, width: 10.4, height: 24.0))
+
+            // Outer matte shell
+            ctx.setFillColor(NSColor(srgbRed: 0.21, green: 0.23, blue: 0.28, alpha: 0.99).cgColor)
+            ctx.fillEllipse(in: CGRect(x: side * 2.0 - 6.6, y: -13.2, width: 13.2, height: 26.4))
+
+            // Glowing accent ring pulsing gently with the beat
+            ctx.setStrokeColor(NSColor(srgbRed: ar, green: ag, blue: ab, alpha: 0.88 * beatPulse).cgColor)
+            ctx.setLineWidth(1.7)
+            ctx.strokeEllipse(in: CGRect(x: side * 2.4 - 4.0, y: -8.2, width: 8.0, height: 16.4))
+            ctx.restoreGState()
+        }
+
+        // 3. Floating vector musical notes drifting upward from the earcups
+        let noteConfigs: [(side: CGFloat, phaseOff: CGFloat, doubleNote: Bool)] = [
+            (-1.0, 0.00, false),
+            ( 1.0, 0.36, true),
+            (-1.0, 0.68, true)
+        ]
+        for nc in noteConfigs {
+            let raw = (physics.musicPhase * 0.14 + nc.phaseOff).truncatingRemainder(dividingBy: 1.0)
+            let cyc = raw < 0 ? raw + 1.0 : raw
+            let fadeIn = min(1.0, cyc / 0.18)
+            let fadeOut = min(1.0, (1.0 - cyc) / 0.26)
+            let alpha = fadeIn * fadeOut * 0.92
+            if alpha < 0.03 { continue }
+            let nx = nc.side * (earX + 10.0) + sin(cyc * 6.2832 + nc.phaseOff * 4.0) * 5.5
+            let ny = earY - 12.0 - cyc * 44.0
+            let nScale: CGFloat = 0.78 + 0.28 * sin(cyc * 3.1416)
+
+            ctx.saveGState()
+            ctx.translateBy(x: nx, y: ny)
+            ctx.scaleBy(x: nScale, y: nScale)
+            let noteCol = NSColor(srgbRed: ar, green: ag, blue: ab, alpha: alpha).cgColor
+            let shadowCol = NSColor(srgbRed: 0.10, green: 0.11, blue: 0.15, alpha: alpha * 0.65).cgColor
+            for pass in 0..<2 {
+                ctx.saveGState()
+                if pass == 0 { ctx.translateBy(x: 0.8, y: 1.0) }
+                let col = pass == 0 ? shadowCol : noteCol
+                ctx.setFillColor(col)
+                ctx.setStrokeColor(col)
+                ctx.setLineWidth(1.6)
+                ctx.setLineCap(.round)
+                ctx.setLineJoin(.round)
+                // First notehead + stem
+                ctx.fillEllipse(in: CGRect(x: -3.2, y: -2.2, width: 5.2, height: 3.8))
+                ctx.move(to: CGPoint(x: 1.6, y: -0.6))
+                ctx.addLine(to: CGPoint(x: 1.6, y: -11.5))
+                if nc.doubleNote {
+                    ctx.addLine(to: CGPoint(x: 8.4, y: -13.2))
+                    ctx.addLine(to: CGPoint(x: 8.4, y: -2.4))
+                    ctx.strokePath()
+                    ctx.fillEllipse(in: CGRect(x: 3.6, y: -4.0, width: 5.2, height: 3.8))
+                } else {
+                    ctx.addQuadCurve(to: CGPoint(x: 6.2, y: -7.5), control: CGPoint(x: 5.8, y: -10.8))
+                    ctx.strokePath()
+                }
+                ctx.restoreGState()
+            }
+            ctx.restoreGState()
+        }
+
+        ctx.restoreGState()
+    }
 
     private static func drawHeadFeatures(
         in ctx: CGContext,

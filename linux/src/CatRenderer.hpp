@@ -306,6 +306,10 @@ public:
                             anchorBit(SkinAnchorPoint::Face) | anchorBit(SkinAnchorPoint::HeadTop));
         }
 
+        if (physics.musicIntensity > 0.01f) {
+            drawMusicHeadphones(cr, headCenter, physics, settings.eyeTheme, skin);
+        }
+
         if (tailInFront) {
             drawTail(cr, seatX, seatY, physics, skin);
             if (!skin.decorations.empty()) {
@@ -2271,6 +2275,134 @@ private:
     }
 
     // MARK: - 2.5D Eyes & Whiskers
+
+    static void drawMusicHeadphones(cairo_t* cr, Pt center, const CatPhysics& physics, EyeColorTheme eyeTheme, const SkinSpec& skin) {
+        double t = std::clamp((double)physics.musicIntensity, 0.0, 1.0);
+        double pop = t * t * (3.0 - 2.0 * t);
+        if (pop < 0.01) return;
+
+        cairo_save(cr);
+        cairo_translate(cr, center.x, center.y + (1.0 - pop) * -14.0);
+        cairo_rotate(cr, (double)physics.headTilt.value);
+        double hs = (double)skin.shape.headScale;
+        if (hs != 1.0) cairo_scale(cr, hs, hs);
+
+        double cf = (double)skin.shape.cheekFullness;
+        double yawShift = (double)physics.headYaw.value * 2.5;
+        double earX = 43.0 * cf;
+        double earY = 2.0;
+        double crownY = -36.5;
+        double beatPulse = 0.72 + 0.28 * std::fabs(std::sin((double)physics.musicPhase));
+        RGBA eyeC = eyePrimary(eyeTheme);
+
+        // 1. Over-head arch band
+        cairo_new_path(cr);
+        cairo_move_to(cr, -earX + yawShift * 0.4, earY - 4.0);
+        cairo_curve_to(cr, -earX * 0.94 + yawShift * 0.2, crownY - 7.5,
+                            earX * 0.94 + yawShift * 0.2, crownY - 7.5,
+                            earX + yawShift * 0.4, earY - 4.0);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_source_rgba(cr, 0.16, 0.17, 0.21, 0.98 * pop);
+        cairo_set_line_width(cr, 6.2);
+        cairo_stroke_preserve(cr);
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.22 * pop);
+        cairo_set_line_width(cr, 1.6);
+        cairo_stroke(cr);
+
+        // 2. Left & right cushioned over-ear cups
+        for (double side : { -1.0, 1.0 }) {
+            cairo_save(cr);
+            cairo_translate(cr, side * earX + yawShift * 0.55, earY);
+            cairo_rotate(cr, side * -0.10);
+
+            cairo_save(cr);
+            cairo_translate(cr, -side * 1.5, 0.0);
+            cairo_scale(cr, 5.2, 12.0);
+            cairo_arc(cr, 0.0, 0.0, 1.0, 0.0, 2.0 * M_PI);
+            cairo_restore(cr);
+            cairo_set_source_rgba(cr, 0.10, 0.11, 0.14, 0.96 * pop);
+            cairo_fill(cr);
+
+            cairo_save(cr);
+            cairo_translate(cr, side * 2.0, 0.0);
+            cairo_scale(cr, 6.6, 13.2);
+            cairo_arc(cr, 0.0, 0.0, 1.0, 0.0, 2.0 * M_PI);
+            cairo_restore(cr);
+            cairo_set_source_rgba(cr, 0.21, 0.23, 0.28, 0.99 * pop);
+            cairo_fill(cr);
+
+            cairo_save(cr);
+            cairo_translate(cr, side * 2.4, 0.0);
+            cairo_scale(cr, 4.0, 8.2);
+            cairo_arc(cr, 0.0, 0.0, 1.0, 0.0, 2.0 * M_PI);
+            cairo_restore(cr);
+            cairo_set_source_rgba(cr, eyeC.r, eyeC.g, eyeC.b, 0.88 * beatPulse * pop);
+            cairo_set_line_width(cr, 1.7);
+            cairo_stroke(cr);
+
+            cairo_restore(cr);
+        }
+
+        // 3. Floating vector musical notes
+        struct NoteCfg { double side; double off; bool dbl; };
+        const NoteCfg notes[3] = { { -1.0, 0.00, false }, { 1.0, 0.36, true }, { -1.0, 0.68, true } };
+        for (const NoteCfg& nc : notes) {
+            double raw = std::fmod((double)physics.musicPhase * 0.14 + nc.off, 1.0);
+            double cyc = raw < 0.0 ? raw + 1.0 : raw;
+            double fadeIn = std::min(1.0, cyc / 0.18);
+            double fadeOut = std::min(1.0, (1.0 - cyc) / 0.26);
+            double alpha = fadeIn * fadeOut * 0.92 * pop;
+            if (alpha < 0.03) continue;
+            double nx = nc.side * (earX + 10.0) + std::sin(cyc * 6.2832 + nc.off * 4.0) * 5.5;
+            double ny = earY - 12.0 - cyc * 44.0;
+            double nScale = 0.78 + 0.28 * std::sin(cyc * 3.1416);
+
+            cairo_save(cr);
+            cairo_translate(cr, nx, ny);
+            cairo_scale(cr, nScale, nScale);
+            for (int pass = 0; pass < 2; ++pass) {
+                cairo_save(cr);
+                if (pass == 0) {
+                    cairo_translate(cr, 0.8, 1.0);
+                    cairo_set_source_rgba(cr, 0.10, 0.11, 0.15, alpha * 0.65);
+                } else {
+                    cairo_set_source_rgba(cr, eyeC.r, eyeC.g, eyeC.b, alpha);
+                }
+                cairo_set_line_width(cr, 1.6);
+                cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+                cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+
+                cairo_save(cr);
+                cairo_translate(cr, -0.6, -0.3);
+                cairo_scale(cr, 2.6, 1.9);
+                cairo_arc(cr, 0.0, 0.0, 1.0, 0.0, 2.0 * M_PI);
+                cairo_restore(cr);
+                cairo_fill(cr);
+
+                cairo_new_path(cr);
+                cairo_move_to(cr, 1.6, -0.6);
+                cairo_line_to(cr, 1.6, -11.5);
+                if (nc.dbl) {
+                    cairo_line_to(cr, 8.4, -13.2);
+                    cairo_line_to(cr, 8.4, -2.4);
+                    cairo_stroke(cr);
+                    cairo_save(cr);
+                    cairo_translate(cr, 6.2, -2.1);
+                    cairo_scale(cr, 2.6, 1.9);
+                    cairo_arc(cr, 0.0, 0.0, 1.0, 0.0, 2.0 * M_PI);
+                    cairo_restore(cr);
+                    cairo_fill(cr);
+                } else {
+                    cairo_curve_to(cr, 4.4, -11.0, 6.0, -9.4, 6.2, -7.5);
+                    cairo_stroke(cr);
+                }
+                cairo_restore(cr);
+            }
+            cairo_restore(cr);
+        }
+
+        cairo_restore(cr);
+    }
 
     static void drawHeadFeatures(cairo_t* cr, Pt center, const CatPhysics& physics, EyeColorTheme eyeTheme, const SkinSpec& skin,
                                  double scruffStartle = 0.0, double scruffWide = 0.0, bool overrideSkinIris = false) {
