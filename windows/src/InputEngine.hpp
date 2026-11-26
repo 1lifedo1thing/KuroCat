@@ -44,8 +44,8 @@ public:
     int totalKeystrokesToday = 0;
     bool isRawInputRegistered = false;
     HHOOK kbHook_ = nullptr; // kept for compatibility; managed on hookThread_
-    static constexpr UINT WM_HOOK_KEY_EVENT = WM_APP + 1;
-    static constexpr UINT WM_HOOK_REINSTALL = WM_APP + 2;
+    static constexpr UINT WM_HOOK_KEY_EVENT = WM_APP + 61;
+    static constexpr UINT WM_HOOK_REINSTALL = WM_APP + 62;
 
     std::function<void(PhysicalKey)> onKeyDown;
     std::function<void(PhysicalKey)> onKeyUp;

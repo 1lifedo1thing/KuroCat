@@ -3727,8 +3727,8 @@ void tickAndRender(AppState& app) {
     curPose.flipHorizontal = app.settings.flipHorizontal;
     curPose.rotationDeg10 = (int)std::lround(app.settings.rotationDeg * 10.0f);
     curPose.isEditMode = app.settings.isEditMode;
-    curPose.showKeyOverlay = app.settings.showKeyOverlay;
-    curPose.showStats = app.settings.showStats;
+    curPose.showKeyOverlay = app.settings.showKeyBadges;
+    curPose.showStats = app.settings.showMouseBadges;
     curPose.isEnglish = app.settings.isEnglish;
     curPose.isMusicPlaying = app.physics.isMusicPlaying;
     curPose.foregroundBlocksKeys = app.foregroundBlocksKeys;
