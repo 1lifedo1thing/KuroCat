@@ -29,7 +29,7 @@ enum class SkinSpace : int { Head = 0, Skull, Body, Tail, LeftEar, RightEar, Lef
 enum class SkinBuild : int { Standard = 0, Sleek };
 enum class SkinHeadSurface : int { Dome = 0, Plane };
 enum class SkinAnchorPoint : int { HeadTop = 0, Face, Neck, TailTip };
-enum class SkinRenderStyle : int { Standard = 0, Douni, Dazed };
+enum class SkinRenderStyle : int { Standard = 0, Douni, Dazed, Beagle };
 enum class SkinTypingStyle : int { Standard = 0, Douni };
 
 struct SkinPoint { float x = 0, y = 0; };
@@ -545,6 +545,7 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
     if (const Value* rs = root.get("renderStyle"); rs && rs->type == Value::JString) {
         if (rs->s == "douni") s.renderStyle = SkinRenderStyle::Douni;
         else if (rs->s == "dazed") s.renderStyle = SkinRenderStyle::Dazed;
+        else if (rs->s == "beagle") s.renderStyle = SkinRenderStyle::Beagle;
     }
     if (const Value* ts = root.get("typingStyle"); ts && ts->type == Value::JString) {
         if (ts->s == "douni") s.typingStyle = SkinTypingStyle::Douni;
