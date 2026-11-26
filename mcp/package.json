@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./server.mjs",
   "bin": {
-    "kurocat-mcp": "./server.mjs"
+    "kurocat-mcp": "server.mjs"
   },
   "files": [
     "server.mjs",
@@ -27,7 +27,7 @@
   "homepage": "https://kurocat.cc/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chanke17/KuroCat.git",
+    "url": "git+https://github.com/chanke17/KuroCat.git",
     "directory": "mcp"
   },
   "bugs": {
