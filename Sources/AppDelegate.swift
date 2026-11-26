@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isPresentingModalAlert = false
     private var dressingRoom: DressingRoomWindowController?
     private var settingsWindow: SettingsWindowController?
+    private var skinManagerWindow: SkinBatchDeleteWindowController?
     private var updatePromptController: UpdatePromptWindowController?
 
     // MARK: - Hourly Announcement
@@ -262,30 +263,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         renderTimer = timer
     }
 
+    private let fullscreenCheckQueue = DispatchQueue(label: "com.kurocat.fullscreen-check", qos: .utility)
+    private var fullscreenCheckInFlight = false
+
     private func updateFullscreenAutoHide(now: CFTimeInterval) -> Bool {
-        if now - lastFullscreenCheckTime <= 0.5 {
+        let s = CatSettings.shared
+        let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
+        if !s.autoHideFullscreen || obsBg {
+            if hiddenByFullscreen {
+                hiddenByFullscreen = false
+                overlayWindow.alphaValue = 1.0
+                lastFrameTime = now
+                overlayWindow.catView.needsDisplay = true
+            }
+            return false
+        }
+        if now - lastFullscreenCheckTime <= 0.5 || fullscreenCheckInFlight {
             return hiddenByFullscreen
         }
         lastFullscreenCheckTime = now
-        let s = CatSettings.shared
-        let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
-        if s.autoHideFullscreen && !obsBg {
+        fullscreenCheckInFlight = true
+        fullscreenCheckQueue.async { [weak self] in
             let fs = Self.isOtherAppFullscreen()
-            if fs != hiddenByFullscreen {
-                hiddenByFullscreen = fs
-                overlayWindow.alphaValue = fs ? 0.0 : 1.0
-                if fs {
-                    overlayWindow.ignoresMouseEvents = true
-                } else {
-                    lastFrameTime = now
-                    overlayWindow.catView.needsDisplay = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.fullscreenCheckInFlight = false
+                let s = CatSettings.shared
+                let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
+                guard s.autoHideFullscreen && !obsBg else { return }
+                if fs != self.hiddenByFullscreen {
+                    self.hiddenByFullscreen = fs
+                    self.overlayWindow.alphaValue = fs ? 0.0 : 1.0
+                    if fs {
+                        self.overlayWindow.ignoresMouseEvents = true
+                    } else {
+                        self.lastFrameTime = CACurrentMediaTime()
+                        self.overlayWindow.catView.needsDisplay = true
+                    }
                 }
             }
-        } else if hiddenByFullscreen {
-            hiddenByFullscreen = false
-            overlayWindow.alphaValue = 1.0
-            lastFrameTime = now
-            overlayWindow.catView.needsDisplay = true
         }
         return hiddenByFullscreen
     }
@@ -455,6 +471,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let desiredCadence: RenderCadence = isActive ? .active : (isAsleep ? .asleep : .idle)
         if desiredCadence != renderCadence {
+            if desiredCadence == .asleep {
+                CatRenderer.purgeVolatileCaches()
+            }
             configureRenderTimer(for: desiredCadence)
         }
         if isActive || view.poseNeedsDisplay() {
@@ -607,18 +626,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             deleteParent.submenu = deleteMenu
             coatMenu.addItem(deleteParent)
+
+            let batchTitle = tr("📦 批量删除皮肤…", "📦 Batch Delete Skins…")
+            let batchItem = NSMenuItem(title: batchTitle, action: #selector(openSkinManagerWindow), keyEquivalent: "")
+            batchItem.attributedTitle = NSAttributedString(
+                string: batchTitle,
+                attributes: [.foregroundColor: NSColor.systemRed, .font: NSFont.menuFont(ofSize: 0)]
+            )
+            batchItem.target = self
+            coatMenu.addItem(batchItem)
         }
         let coatParent = NSMenuItem(title: tr("猫咪皮肤 🐱", "Cat Skin 🐱"), action: nil, keyEquivalent: "")
         coatParent.submenu = coatMenu
         menu.addItem(coatParent)
-
-        let topWorkshopItem = NSMenuItem(
-            title: tr("🎨 皮肤工坊（制作皮肤）…", "🎨 Skin Workshop (Create Skins)…"),
-            action: #selector(openSkinWorkshop),
-            keyEquivalent: ""
-        )
-        topWorkshopItem.target = self
-        menu.addItem(topWorkshopItem)
 
         let websiteItem = NSMenuItem(
             title: tr("🌐 软件官网 (kurocat.cc)", "🌐 Website (kurocat.cc)"),
@@ -662,9 +682,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        let testToastItem = NSMenuItem(title: "🕒 测试整点报时弹窗", action: #selector(testHourlyToast), keyEquivalent: "")
-        testToastItem.target = self
-        menu.addItem(testToastItem)
 
         let relaunchItem = NSMenuItem(title: tr("重启 KuroCat", "Restart KuroCat"), action: #selector(relaunchApp), keyEquivalent: "")
         relaunchItem.target = self
@@ -696,9 +713,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ctrl.onOpenDressingRoom = { [weak self] in
                 self?.showDressingRoom()
             }
+            ctrl.onOpenSkinManager = { [weak self] in
+                self?.openSkinManagerWindow()
+            }
             ctrl.onSkinsDirectoryChanged = { [weak self] in
                 self?.overlayWindow.catView.needsDisplay = true
                 self?.dressingRoom?.refresh()
+                self?.skinManagerWindow?.refresh()
             }
             ctrl.onRenameSkin = { [weak self] id in
                 self?.performRenameSkin(id: id)
@@ -713,6 +734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.overlayWindow.applyWindowLevelAndBehavior()
                 self?.dressingRoom?.syncWindowLevel()
                 self?.settingsWindow?.syncWindowLevel()
+                self?.skinManagerWindow?.syncWindowLevel()
                 self?.updatePromptController?.syncWindowLevel()
                 self?.syncWindowTopmost()
             }
@@ -737,9 +759,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ctrl.onLanguageChanged = { [weak self] in
                 self?.wakeToActive(immediateRedraw: true)
             }
+            releaseOnClose(ctrl.window) { [weak self] in self?.settingsWindow = nil }
             settingsWindow = ctrl
         }
         settingsWindow?.present()
+    }
+
+    private func releaseOnClose(_ window: NSWindow?, clear: @escaping () -> Void) {
+        guard let window else { return }
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { _ in
+            if let token {
+                NotificationCenter.default.removeObserver(token)
+            }
+            clear()
+        }
+    }
+
+    private func purgeSkinCachesIfNeeded() {
+        if CatSettings.shared.activeSkin.renderStyle != .beagle {
+            BeagleAtlas.purgeCache()
+        }
+        CatRenderer.purgeVolatileCaches()
     }
 
     // MARK: - Actions
@@ -836,7 +881,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Int(CGWindowLevelForKey(.screenSaverWindow)),
                 Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2
             ))
-            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+            // Note: .canJoinAllSpaces and .moveToActiveSpace are mutually exclusive in AppKit
+            // and combining them throws NSInternalInconsistencyException (bypassing Swift defer).
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             NSApp.activate(ignoringOtherApps: true)
             alert.window.orderFrontRegardless()
             return alert.runModal()
@@ -1028,6 +1075,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .orangeWhite:
             CatSettings.shared.eyeTheme = .warmAmber
         }
+        purgeSkinCachesIfNeeded()
         wakeToActive(immediateRedraw: true)
         dressingRoom?.refresh()
         settingsWindow?.refresh()
@@ -1075,6 +1123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if dressingRoom == nil {
             let controller = DressingRoomWindowController()
             controller.onImport = { [weak self] url in self?.importSkin(from: url) }
+            releaseOnClose(controller.window) { [weak self] in self?.dressingRoom = nil }
             dressingRoom = controller
         }
         dressingRoom?.present()
@@ -1096,6 +1145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             wakeToActive(immediateRedraw: true)
             dressingRoom?.refresh()
             settingsWindow?.refresh()
+            skinManagerWindow?.refresh()
         } catch {
             let reason = error.localizedDescription
             // With 换装间 open the red status line explains it in place; an alert is only for drops onto the cat.
@@ -1116,6 +1166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let id = sender.representedObject as? String else { return }
         CatSettings.shared.overrideSkinIris = false
         CatSettings.shared.customSkin = id
+        purgeSkinCachesIfNeeded()
         wakeToActive(immediateRedraw: true)
         dressingRoom?.refresh()
         settingsWindow?.refresh()
@@ -1150,6 +1201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             dressingRoom?.refresh()
             settingsWindow?.refresh()
+            skinManagerWindow?.refresh()
         } catch {
             let failed = NSAlert()
             failed.alertStyle = .warning
@@ -1185,6 +1237,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         wakeToActive(immediateRedraw: true)
         dressingRoom?.refresh()
         settingsWindow?.refresh()
+        skinManagerWindow?.refresh()
+    }
+
+    @objc private func openSkinManagerWindow() {
+        if skinManagerWindow == nil {
+            let ctrl = SkinBatchDeleteWindowController()
+            ctrl.onBatchDelete = { [weak self] ids in
+                self?.performBatchDeleteSkins(ids: ids) ?? false
+            }
+            releaseOnClose(ctrl.window) { [weak self] in self?.skinManagerWindow = nil }
+            skinManagerWindow = ctrl
+        }
+        skinManagerWindow?.present()
+    }
+
+    @discardableResult
+    private func performBatchDeleteSkins(ids: [String]) -> Bool {
+        let targets = ids.compactMap { SkinLibrary.shared.skin(id: $0) }
+        guard !targets.isEmpty else { return false }
+        let en = CatSettings.shared.isEnglish
+        let previewNames = targets.prefix(6).map { "• " + SkinLibrary.shared.displayName(for: $0) }.joined(separator: "\n")
+        let extra = targets.count > 6
+            ? (en ? "\n...and \(targets.count - 6) more" : "\n……等共 \(targets.count) 款皮肤")
+            : ""
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = en
+            ? "Delete \(targets.count) selected skin(s)?"
+            : "确认批量删除这 \(targets.count) 款皮肤？"
+        alert.informativeText = (en
+            ? "These .kurocat files will be permanently removed from your skins folder:\n\n"
+            : "以下 .kurocat 文件会从皮肤文件夹中删除，删除后需重新导入：\n\n") + previewNames + extra
+        let delBtn = alert.addButton(withTitle: en ? "🗑 Delete \(targets.count)" : "🗑 全部删除 (\(targets.count))")
+        if #available(macOS 11.0, *) { delBtn.hasDestructiveAction = true }
+        alert.addButton(withTitle: en ? "Cancel" : "取消")
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return false }
+
+        let targetIDs = targets.map { $0.id }
+        let result = SkinLibrary.shared.removeMany(ids: targetIDs)
+        if result.removed.contains(CatSettings.shared.customSkin) {
+            CatSettings.shared.customSkin = ""
+        }
+        if !result.failed.isEmpty {
+            let failedAlert = NSAlert()
+            failedAlert.alertStyle = .warning
+            failedAlert.messageText = en ? "Some skins could not be deleted" : "部分皮肤未能删除"
+            failedAlert.informativeText = en
+                ? "Deleted \(result.removed.count), failed \(result.failed.count)."
+                : "已删除 \(result.removed.count) 款，有 \(result.failed.count) 款文件无法删除。"
+            runModalAlert(failedAlert)
+        }
+        wakeToActive(immediateRedraw: true)
+        dressingRoom?.refresh()
+        settingsWindow?.refresh()
+        skinManagerWindow?.refresh()
+        return !result.removed.isEmpty
     }
 
     @objc private func selectKeyboardTheme(_ sender: NSMenuItem) {
@@ -1412,6 +1521,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         onCancel: @escaping () -> Void
     ) {
         let ctrl = updatePromptController ?? UpdatePromptWindowController()
+        if updatePromptController == nil {
+            releaseOnClose(ctrl.window) { [weak self] in self?.updatePromptController = nil }
+        }
         updatePromptController = ctrl
         ctrl.configure(
             title: title,
@@ -1756,7 +1868,7 @@ private final class UpdatePromptWindowController: NSWindowController {
         window.level = CatSettings.shared.fullScreenOverlay
             ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
             : .modalPanel
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     }
 
     func configure(
