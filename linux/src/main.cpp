@@ -2270,10 +2270,10 @@ static bool isX11ShowingDesktop() {
     if (!gdpy || !GDK_IS_X11_DISPLAY(gdpy)) return false;
     Display* dpy = GDK_DISPLAY_XDISPLAY(gdpy);
     if (!dpy) return false;
-    static Atom aShowDesk = None;
-    if (aShowDesk == None) aShowDesk = XInternAtom(dpy, "_NET_SHOWING_DESKTOP", True);
-    if (aShowDesk == None) return false;
-    Atom actualType = None;
+    static Atom aShowDesk = 0;
+    if (aShowDesk == 0) aShowDesk = XInternAtom(dpy, "_NET_SHOWING_DESKTOP", True);
+    if (aShowDesk == 0) return false;
+    Atom actualType = 0;
     int actualFormat = 0;
     unsigned long nItems = 0, bytesAfter = 0;
     unsigned char* prop = nullptr;
