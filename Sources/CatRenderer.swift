@@ -2891,8 +2891,11 @@ enum CatRenderer {
                 }
 
                 let isDome = skin.headSurface == .dome
+                let headTx = HeadTransform(yaw: yaw, pitch: pitch, tilt: hTilt, headScale: skin.shape.headScale, isDome: isDome)
+                let bodyTx = BodyTransform(bodyWidth: skin.shape.bodyWidth, bodySquash: physics.bodySquash.value, lieIntensity: lie, bodyTilt: bTilt)
                 for (idx, mark) in skin.marks.enumerated() {
                     if mark.clipToBib && coverage == 0 { continue }
+                    let needsBrushRender = mark.stroke && mark.brush != .round
                     switch mark.space {
                     case .body:
                         if let bodyGeo,
@@ -2904,7 +2907,11 @@ enum CatRenderer {
                             ctx.addPath(jawBodyPath)
                             ctx.clip()
                             ctx.translateBy(x: seatX - headCenter.x, y: seatY - headCenter.y)
-                            drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
+                            if needsBrushRender {
+                                drawMark(in: ctx, mark, map: { bodyTx.mapRelative($0) })
+                            } else {
+                                drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
+                            }
                             ctx.restoreGState()
                         }
                     case .skull, .head:
@@ -2923,7 +2930,12 @@ enum CatRenderer {
                                 ctx.addPath(jawHeadPath)
                                 ctx.clip()
                             }
-                            drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
+                            if needsBrushRender {
+                                let isSkull = (mark.space == .skull)
+                                drawMark(in: ctx, mark, map: { headTx.mapRelative($0, skull: isSkull) })
+                            } else {
+                                drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
+                            }
                             ctx.restoreGState()
                         }
                     default:
