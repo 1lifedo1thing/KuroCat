@@ -10,6 +10,21 @@ enum KeyboardTheme: String, CaseIterable {
     case retroCream = "复古奶油灰"
 }
 
+/// How the keyboard RGB backlight travels across the deck.
+enum KeyboardMarqueeMode: Int, CaseIterable {
+    /// Cycle through every mode automatically (default).
+    case all = 3
+    /// Single band sweeping left → right, then restarting at the left edge (original behaviour).
+    case sweep = 0
+    /// Seamless circular wrap: the trail leaving the right edge re-enters from the left.
+    case loop = 1
+    /// A ring expanding outward from the deck centre towards both edges.
+    case ripple = 2
+
+    /// Modes used by the `.all` auto-rotation (order matters for the cycle).
+    static let rotation: [KeyboardMarqueeMode] = [.sweep, .loop, .ripple]
+}
+
 enum CatCoatTheme: String, CaseIterable {
     case classicBlack = "经典小黑猫 (原版)"
     case siamese = "挖煤暹罗猫"
@@ -72,6 +87,9 @@ final class CatSettings {
     }
     var keyboardMarquee: Bool {
         didSet { UserDefaults.standard.set(keyboardMarquee, forKey: "KuroCat.KeyboardMarquee") }
+    }
+    var marqueeMode: KeyboardMarqueeMode {
+        didSet { UserDefaults.standard.set(marqueeMode.rawValue, forKey: "KuroCat.MarqueeMode") }
     }
     var levelKeyboard: Bool {
         didSet {
@@ -212,6 +230,7 @@ final class CatSettings {
         footEasterEgg = d.object(forKey: "KuroCat.FootEasterEgg") as? Bool ?? true
         tailEasterEgg = d.object(forKey: "KuroCat.TailEasterEgg") as? Bool ?? true
         keyboardMarquee = d.object(forKey: "KuroCat.KeyboardMarquee") as? Bool ?? true
+        marqueeMode = KeyboardMarqueeMode(rawValue: d.object(forKey: "KuroCat.MarqueeMode") as? Int ?? 3) ?? .all
         levelKeyboard = d.object(forKey: "KuroCat.LevelKeyboard") as? Bool ?? true
         KeyboardLayout.levelKeyboard = levelKeyboard
         obsCaptureMode = d.object(forKey: "KuroCat.OBSCaptureMode") as? Int ?? 0
@@ -351,6 +370,19 @@ final class CatPhysics {
     // Keyboard marquee: normalized position (0..1) of the light head, plus its speed boost.
     var marqueePhase: CGFloat = 0
     var marqueeBoost = Spring1D(0)
+    /// Elapsed seconds inside the current mode while `.all` auto-rotation is active.
+    private var marqueeRotationElapsed: Double = 0
+    /// Seconds each marquee mode stays on screen before the next one takes over.
+    private let marqueeRotationPeriod: Double = 10
+    private(set) var marqueeRotationIndex: Int = 0
+
+    /// The mode actually rendered this frame: the user's pick, or the rotating one when `.all`.
+    var effectiveMarqueeMode: KeyboardMarqueeMode {
+        let selected = CatSettings.shared.marqueeMode
+        guard selected == .all else { return selected }
+        let rotation = KeyboardMarqueeMode.rotation
+        return rotation[marqueeRotationIndex % rotation.count]
+    }
 
     var bodyShiftX = Spring1D(0)
     var bodyTilt = Spring1D(0)       // radians
@@ -1322,6 +1354,14 @@ final class CatPhysics {
             marqueeBoost.target = max(0, min(1, (CGFloat(activeKeys.count) - 2) / 5))
             marqueeBoost.step(dt: dt, stiffness: 90, damping: 20)
             marqueePhase = (marqueePhase + dt * (0.42 + 0.40 * marqueeBoost.value)).truncatingRemainder(dividingBy: 1.0)
+            // `.all` rotates sweep → loop → ripple so every mode gets its turn.
+            if CatSettings.shared.marqueeMode == .all {
+                marqueeRotationElapsed += dt
+                if marqueeRotationElapsed >= marqueeRotationPeriod {
+                    marqueeRotationElapsed -= marqueeRotationPeriod
+                    marqueeRotationIndex = (marqueeRotationIndex + 1) % KeyboardMarqueeMode.rotation.count
+                }
+            }
         }
         let tailKey = orderedKeys.first { $0 != leftKey && $0 != rightKey && $0 != footKey }
         var tip = tailTyping.target > 0 ? tailKey.map { KeyboardLayout.canvasPoint(for: $0) } ?? CGPoint(x: 275, y: 196) : CGPoint(x: 275, y: 196)

@@ -1231,6 +1231,7 @@ enum CatRenderer {
         let style: KeyboardStyle
         let glowColor: RGBAColor
         let steps: Int
+        let mode: KeyboardMarqueeMode
     }
 
     // Keep only the currently displayed keyboard. Retina scale can change when the window moves screens.
@@ -1263,47 +1264,26 @@ enum CatRenderer {
         }
 
         let glowRGBA = RGBAColor(glowBaseColor)
-        if marquee {
+        let marqueeMode = physics.effectiveMarqueeMode
+        if marquee && physics.keyGlow.isEmpty {
             let asleep = physics.sleepiness >= 0.95
             let steps = marqueeSteps(asleep: asleep)
             let bucket = marqueeBucket(phase: physics.marqueePhase, asleep: asleep)
-            let cKey = MarqueeCycleKey(style: style, glowColor: glowRGBA, steps: steps)
+            let cKey = MarqueeCycleKey(style: style, glowColor: glowRGBA, steps: steps, mode: marqueeMode)
             if marqueeCycleCache?.key != cKey {
                 marqueeCycleCache = (cKey, Dictionary(minimumCapacity: steps))
             }
-            let baseBmp: KeyboardBitmap?
             if let cached = marqueeCycleCache?.bitmaps[bucket] {
-                baseBmp = cached
-            } else {
-                let qPhase = CGFloat(bucket) / CGFloat(steps)
-                let bmp = KeyboardBitmap(bounds: artwork.bounds, scale: style.scale, draw: { mctx in
-                    renderMarqueeKeyboard(in: mctx, artwork: artwork, phase: qPhase, glowBaseColor: glowBaseColor)
-                })
-                if let bmp { marqueeCycleCache?.bitmaps[bucket] = bmp }
-                baseBmp = bmp
+                cached.draw(in: ctx)
+                return
             }
-            if let baseBmp {
-                baseBmp.draw(in: ctx)
-                if !physics.keyGlow.isEmpty {
-                    let phase = physics.marqueePhase.truncatingRemainder(dividingBy: 1)
-                    let backlight = KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
-                                                    start: artwork.deckStart, end: artwork.deckEnd)
-                    for (k, glow) in physics.keyGlow where glow > 0.01 {
-                        guard let keyArt = artwork.keyByKey[k] else { continue }
-                        ctx.saveGState()
-                        ctx.addPath(keyArt.erasePath)
-                        ctx.clip()
-                        artwork.chassis?.draw(in: ctx)
-                        drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath)
-                        ctx.restoreGState()
-                        drawKeyboardKey(keyArt, in: ctx, glow: glow, glowRGBA: glowRGBA, backlight: backlight, drawLegend: true)
-                    }
-                    for (key, glow) in physics.keyGlow where glow > 0.05 {
-                        let center = KeyboardLayout.canvasPoint(for: key)
-                        drawRadialGlow(in: ctx, center: center, radius: 17.0 + glow * 6.0,
-                                       color: glowBaseColor.withAlphaComponent(0.36 * glow))
-                    }
-                }
+            let qPhase = CGFloat(bucket) / CGFloat(steps)
+            if let bmp = KeyboardBitmap(bounds: artwork.bounds, scale: style.scale, draw: { mctx in
+                renderMarqueeKeyboard(in: mctx, artwork: artwork, phase: qPhase,
+                                      glowBaseColor: glowBaseColor, mode: marqueeMode)
+            }) {
+                marqueeCycleCache?.bitmaps[bucket] = bmp
+                bmp.draw(in: ctx)
                 return
             }
         }
@@ -1324,7 +1304,7 @@ enum CatRenderer {
             let phase = physics.marqueePhase.truncatingRemainder(dividingBy: 1)
             let backlight = marquee
                 ? KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
-                                  start: artwork.deckStart, end: artwork.deckEnd)
+                                  start: artwork.deckStart, end: artwork.deckEnd, mode: marqueeMode)
                 : nil
             if let backlight { drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath) }
             let batchLegends = physics.keyGlow.isEmpty && artwork.legends != nil
@@ -1349,11 +1329,12 @@ enum CatRenderer {
         in ctx: CGContext,
         artwork: KeyboardArtwork,
         phase: CGFloat,
-        glowBaseColor: NSColor
+        glowBaseColor: NSColor,
+        mode: KeyboardMarqueeMode
     ) {
         artwork.chassis?.draw(in: ctx)
         let backlight = KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
-                                        start: artwork.deckStart, end: artwork.deckEnd)
+                                        start: artwork.deckStart, end: artwork.deckEnd, mode: mode)
         drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath)
         let glowRGBA = RGBAColor(glowBaseColor)
         let batchLegends = artwork.legends != nil
@@ -1585,16 +1566,19 @@ enum CatRenderer {
         let rgba: RGBAColor
         let start: CGPoint
         let end: CGPoint
+        let mode: KeyboardMarqueeMode
         let dx: CGFloat
         let dy: CGFloat
         let lengthSquared: CGFloat
 
-        init(phase: CGFloat, color: NSColor, start: CGPoint, end: CGPoint) {
+        init(phase: CGFloat, color: NSColor, start: CGPoint, end: CGPoint,
+             mode: KeyboardMarqueeMode = .sweep) {
             self.phase = phase
             self.color = color
             self.rgba = RGBAColor(color)
             self.start = start
             self.end = end
+            self.mode = mode
             dx = end.x - start.x
             dy = end.y - start.y
             lengthSquared = dx * dx + dy * dy
@@ -1606,8 +1590,38 @@ enum CatRenderer {
         }
 
         func wave(at t: CGFloat) -> CGFloat {
-            let distance = phase - t
-            return exp(-(distance < 0 ? distance + 1 : distance) / 0.125)
+            switch mode {
+            case .sweep, .all:
+                let distance = phase - t
+                return exp(-(distance < 0 ? distance + 1 : distance) / 0.125)
+            case .loop:
+                // Circular distance so the trail leaving the right edge re-enters on the left.
+                var distance = (phase - t).truncatingRemainder(dividingBy: 1)
+                if distance < 0 { distance += 1 }
+                return exp(-distance / 0.125)
+            case .ripple:
+                // Ring expanding from the deck centre (t = 0.5) towards both edges (t = 0 / 1).
+                let fromCenter = abs(t - 0.5) * 2
+                return exp(-abs(phase - fromCenter) / 0.10)
+            }
+        }
+
+        /// Screen positions of the bright light heads for this mode.
+        func headPoints() -> [CGPoint] {
+            func point(at t: CGFloat) -> CGPoint {
+                CGPoint(x: start.x + dx * t, y: start.y + dy * t)
+            }
+            switch mode {
+            case .sweep, .all:
+                return [point(at: phase)]
+            case .loop:
+                // While wrapping, fade in the head entering from the left edge as well.
+                return phase > 0.85 ? [point(at: phase), point(at: phase - 1)] : [point(at: phase)]
+            case .ripple:
+                // Two symmetric heads travelling from the centre towards each edge.
+                let half = phase * 0.5
+                return [point(at: 0.5 - half), point(at: 0.5 + half)]
+            }
         }
     }
 
@@ -1618,23 +1632,26 @@ enum CatRenderer {
         ctx.addPath(deck)
         ctx.clip()
         let bucket = ((Int((light.phase * 60.0).rounded()) % 60) + 60) % 60
+        // Mode-dependent wave shapes must not share gradient cache entries.
+        let cacheKey = bucket * 4 + light.mode.rawValue
         let band: CGGradient?
-        if let cached = marqueeGradientCache[bucket] {
+        if let cached = marqueeGradientCache[cacheKey] {
             band = cached
         } else {
             let colors = marqueeStops.map { stop in
                 light.color.withAlphaComponent(light.wave(at: stop) * 200.0 / 255.0).cgColor
             }
             band = CGGradient(colorsSpace: rgbColorSpace, colors: colors as CFArray, locations: marqueeStops)
-            if let band { marqueeGradientCache[bucket] = band }
+            if let band { marqueeGradientCache[cacheKey] = band }
         }
         if let band {
             ctx.drawLinearGradient(band, start: light.start, end: light.end,
                                    options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
         }
-        let head = CGPoint(x: light.start.x + light.dx * light.phase, y: light.start.y + light.dy * light.phase)
-        drawRadialGlow(in: ctx, center: head, radius: 44.0,
-                       color: NSColor(calibratedRed: 240.0 / 255, green: 252.0 / 255, blue: 1, alpha: 150.0 / 255))
+        for head in light.headPoints() {
+            drawRadialGlow(in: ctx, center: head, radius: 44.0,
+                           color: NSColor(calibratedRed: 240.0 / 255, green: 252.0 / 255, blue: 1, alpha: 150.0 / 255))
+        }
         ctx.restoreGState()
     }
 
