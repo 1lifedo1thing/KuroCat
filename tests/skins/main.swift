@@ -18,6 +18,7 @@ final class RenderSettings {
  let overrideSkinIris = false
  let isEditMode = false
  let isEnglish = false
+ let pureScruffDrag = false
  let scale: CGFloat = 1.0
 }
 let output = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -306,7 +307,10 @@ func rejects(_ json: String, _ fragment: String) {
 rejects("{", "JSON")
 rejects("[]", "JSON 对象")
 rejects(##"{"name":"x","palette":{"body":"#000000"}}"##, "formatVersion")
-rejects(##"{"formatVersion":2,"name":"x","palette":{"body":"#000000"}}"##, "升级")
+rejects(##"{"formatVersion":3,"name":"x","palette":{"body":"#000000"}}"##, "升级")
+rejects(##"{"formatVersion":2,"minAppVersion":"bad","name":"x","palette":{"body":"#000000"}}"##, "minAppVersion")
+precondition(SkinSpec.compareVersions("1.5.3", "1.5.2") > 0 && SkinSpec.compareVersions("1.5.10", "1.5.9") > 0, "compareVersions broken")
+_ = try! SkinSpec.parse(Data(##"{"formatVersion":2,"minAppVersion":"1.5.3","name":"v2","palette":{"body":"#000000"}}"##.utf8))
 rejects(##"{"formatVersion":1,"name":"x","palette":{"body":"pink"}}"##, "palette.body")
 rejects(##"{"formatVersion":1,"name":"x","palette":{}}"##, "palette.body")
 rejects(##"{"formatVersion":1,"name":"x","palette":{"body":"#000000"},"regions":[{"space":123,"fill":"#FFFFFF","anchors":[]}]}"##, "regions[0].space")

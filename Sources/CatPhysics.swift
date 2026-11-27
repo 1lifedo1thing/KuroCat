@@ -140,6 +140,10 @@ final class CatSettings {
     var enableDragAnimation: Bool {
         didSet { UserDefaults.standard.set(enableDragAnimation, forKey: "KuroCat.EnableDragAnimation") }
     }
+    /// Pure scruff-drag mode (when true, lifting the cat leaves keyboard & mouse behind; default false keeps them carried)
+    var pureScruffDrag: Bool {
+        didSet { UserDefaults.standard.set(pureScruffDrag, forKey: "KuroCat.PureScruffDrag") }
+    }
     /// "zh" or "en"
     var language: String {
         didSet { UserDefaults.standard.set(language, forKey: "KuroCat.Language") }
@@ -244,6 +248,7 @@ final class CatSettings {
         whiteOutline = d.object(forKey: "KuroCat.WhiteOutline") as? Bool ?? true
         enableAnger = d.object(forKey: "KuroCat.EnableAnger") as? Bool ?? true
         enableDragAnimation = d.object(forKey: "KuroCat.EnableDragAnimation") as? Bool ?? true
+        pureScruffDrag = d.object(forKey: "KuroCat.PureScruffDrag") as? Bool ?? false
         language = d.string(forKey: "KuroCat.Language") ?? "zh"
         petInteraction = d.object(forKey: "KuroCat.PetInteraction") as? Bool ?? true
         fullClickThrough = d.object(forKey: "KuroCat.FullClickThrough") as? Bool ?? false
@@ -401,6 +406,14 @@ final class CatPhysics {
     var scruffSwing = Spring1D(0)     // horizontal pendulum sway while dragged (+ = trails left when dragged right)
     var scruffSwingY = Spring1D(0)    // vertical inertia while dragged (+ = stretches down when lifted up, - = floats up when dropped)
     var scruffTailSwing = Spring1D(0) // looser secondary tail whip/billow while dragged
+    // Scruff-held pendulum: the cat hangs from the pinched nape like a real limp cat.
+    // Angles are radians from straight down, + = swings toward canvas right.
+    var dangleAngle: CGFloat = 0, dangleAngVel: CGFloat = 0        // whole body around the pinch
+    var dangleStretch: CGFloat = 0, dangleStretchVel: CGFloat = 0  // body length (- = still curled up, + = stretched)
+    var dangleLeg: CGFloat = 0, dangleLegVel: CGFloat = 0          // dangling legs (follow the body a beat late)
+    var dangleTailA: CGFloat = 0, dangleTailAVel: CGFloat = 0      // tail base segment
+    var dangleTailB: CGFloat = 0, dangleTailBVel: CGFloat = 0      // tail tip segment (whips after the base)
+    private var dangleVx: CGFloat = 0, dangleVy: CGFloat = 0       // smoothed pinch velocity (px/s)
     var lieIntensity = Spring1D(0)    // 0 = sitting, 1 = lying cozily on keyboard while idle
     var angerIntensity = Spring1D(0)  // 0 = calm, 1 = angry from very fast typing
     var dizzyIntensity = Spring1D(0)  // 0 = clear, 1 = dizzy spiral eyes + slumped beside keyboard
@@ -693,6 +706,53 @@ final class CatPhysics {
         }
     }
 
+    /// Pendulum for the scruff-held cat, driven by how the window (= the pinching hand) moves.
+    /// dx/dy = canvas-oriented points the window moved since the last frame (y down).
+    private func stepDangle(dt rawDt: CGFloat, dx: CGFloat, dy: CGFloat) {
+        let dt = max(1.0 / 480.0, min(1.0 / 20.0, rawDt))
+        // Smooth the raw hand velocity so uneven mouse-event timing never jerks the cat.
+        let k = 1.0 - exp(-dt / 0.045)
+        let nvx = dangleVx + (dx / dt - dangleVx) * k
+        let nvy = dangleVy + (dy / dt - dangleVy) * k
+        let dvx = max(-900, min(900, nvx - dangleVx))
+        let dvy = max(-900, min(900, nvy - dangleVy))
+        dangleVx = nvx; dangleVy = nvy
+
+        let L: CGFloat = 190         // effective pendulum length (px)
+        let G: CGFloat = 6900        // gravity -> ~1.04 s swing period
+        let air: CGFloat = 1.35      // air drag: trails ~0.2 rad behind a 1000 px/s drag
+        let baseDamp: CGFloat = 0.55
+        // The hand's change in velocity kicks the body (pseudo-force in the hand's frame).
+        let c0 = cos(dangleAngle), s0 = sin(dangleAngle)
+        dangleAngVel += -(dvx * c0 - dvy * s0) / (L * 1.25)
+        dangleStretchVel += -(dvx * s0 + dvy * c0) / 620
+
+        let n = max(1, Int(ceil(dt / (1.0 / 240.0))))
+        let h = dt / CGFloat(n)
+        let breathe = sin(time * 2.3) * 0.012
+        for _ in 0..<n {
+            let c = cos(dangleAngle), s = sin(dangleAngle)
+            let bobVx = dangleVx + L * dangleAngVel * c
+            var acc = -(G / L) * s - air * bobVx * c / L - baseDamp * dangleAngVel
+            let over = abs(dangleAngle) - 0.80   // soft stop so a wild fling never flips the cat
+            if over > 0 { acc -= (dangleAngle > 0 ? 1 : -1) * over * 160 + dangleAngVel * 6 }
+            dangleAngVel += acc * h
+            dangleAngle += dangleAngVel * h
+
+            // Body length: springy stretch (curled -> hanging long), a touch of breathing.
+            dangleStretchVel += (-150 * (dangleStretch - breathe) - 7.8 * dangleStretchVel) * h
+            dangleStretch = max(-0.45, min(0.14, dangleStretch + dangleStretchVel * h))
+
+            // Limp legs hang a beat behind the body; tail base lags more, tail tip whips last.
+            dangleLegVel += (-70 * (dangleLeg - dangleAngle * 0.45) - 3.4 * dangleLegVel) * h
+            dangleLeg += dangleLegVel * h
+            dangleTailAVel += (-46 * (dangleTailA - dangleAngle * 0.40) - 2.4 * dangleTailAVel) * h
+            dangleTailA += dangleTailAVel * h
+            dangleTailBVel += (-30 * (dangleTailB - dangleTailA * 0.85) - 1.9 * dangleTailBVel) * h
+            dangleTailB += dangleTailBVel * h
+        }
+    }
+
     /// Called by OverlayWindow when the user drags the cat window (triggers scruff-pickup posture when enabled!).
     func setDragging(_ dragging: Bool, dragDx: CGFloat = 0, dragDy: CGFloat = 0) {
         let effectiveDragging = dragging && CatSettings.shared.enableDragAnimation
@@ -700,6 +760,12 @@ final class CatPhysics {
         isScruffDragging = effectiveDragging
         if effectiveDragging {
             if !wasDragging {
+                dangleAngle = 0; dangleAngVel = 0
+                dangleStretch = -0.36; dangleStretchVel = 0
+                dangleLeg = 0; dangleLegVel = 0
+                dangleTailA = 0; dangleTailAVel = 0
+                dangleTailB = 0; dangleTailBVel = 0
+                dangleVx = 0; dangleVy = 0
                 scruffStartedHoldingPen = isTabletActive && leftPawOnMouse
                 scruffPenStartNib = tabletNib.point
                 scruffPenStartAngle = stylusAngle
@@ -1029,6 +1095,7 @@ final class CatPhysics {
         if isScruffDragging {
             scruffHoldTime += dt
             scruffDropTimer = 0
+            stepDangle(dt: dt, dx: scruffDragAccumX, dy: scruffDragAccumY)
             let frameScale = (1.0 / 60.0) / max(dt, 1.0 / 120.0)
             let instDx = scruffDragAccumX * frameScale
             let instDy = scruffDragAccumY * frameScale
@@ -1037,6 +1104,7 @@ final class CatPhysics {
             scruffDragDx = scruffDragDx * 0.52 + instDx * 0.85
             scruffDragDy = scruffDragDy * 0.52 + instDy * 0.85
         } else {
+            if scruffDrag.value > 0.005 { stepDangle(dt: dt, dx: 0, dy: 0) }
             scruffDropTimer = max(0, scruffDropTimer - dt)
             if scruffDrag.value < 0.02 { scruffHoldTime = 0 }
             scruffDragDx *= 0.80
@@ -1048,7 +1116,7 @@ final class CatPhysics {
         // Positive scruffSwingY when dragged up (-dy) stretches limbs/tail down; negative when dragged down floats them up
         scruffSwingY.target = isScruffDragging ? 0.78 * tanh(-scruffDragDy / 18.0) : 0.0
         scruffTailSwing.target = isScruffDragging ? 1.22 * tanh(scruffDragDx / 16.0) : 0.0
-        scruffDrag.step(dt: dt, stiffness: 190, damping: 17)
+        scruffDrag.step(dt: dt, stiffness: 80, damping: 14.5)   // ~0.35 s lift-in / set-down so the seated <-> hanging cross-fade reads as motion
         if !isScruffDragging && scruffDrag.value < 0.005 { scruffStartedHoldingPen = false }
         scruffSwing.step(dt: dt, stiffness: 92, damping: 7.4)
         scruffSwingY.step(dt: dt, stiffness: 108, damping: 8.4)
@@ -1582,7 +1650,7 @@ final class CatPhysics {
     }
 }
 
-// MARK: - Skins (.kurocat, formatVersion 1)
+// MARK: - Skins (.kurocat, formatVersion 1–2)
 // Mirrors shared/SkinSpec.hpp (Windows/Linux); the format is documented in docs/skin-format.md.
 // Kept in this file because build.sh compiles an explicit list of Swift sources.
 
@@ -1702,7 +1770,20 @@ struct SkinSpec {
     var preview: Data?
 
     static let maxFileBytes = 2 * 1024 * 1024
-    static let formatVersion = 1
+    // formatVersion 2 = same fields as 1, written by the workshop when the skin needs an app newer than 1.5.2
+    // (the last release that only knew formatVersion 1); `minAppVersion` says which one.
+    static let formatVersion = 2
+    static let maxMarks = 1024 // 256 up to 1.5.2
+
+    /// -1 / 0 / 1 for dotted numeric versions ("1.4.10" > "1.4.9"); missing parts count as 0.
+    static func compareVersions(_ a: String, _ b: String) -> Int {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
+            if l != r { return l < r ? -1 : 1 }
+        }
+        return 0
+    }
 
     var colorpoint: Bool { palette.points != nil }
     func hasPartArt(_ space: SkinSpace) -> Bool {
@@ -1853,6 +1934,15 @@ struct SkinSpec {
         guard let vn = numberValue(ver), vn == vn.rounded() else { throw fail("formatVersion 必须是整数") }
         if vn > Double(formatVersion) { throw fail("这个皮肤使用了更新的格式（formatVersion \(Int(vn))），请先升级 KuroCat") }
         if vn < 1 { throw fail("formatVersion 无效") }
+        if let minApp = root["minAppVersion"] {
+            guard let v = minApp as? String, v.count <= 16,
+                  v.range(of: #"^[0-9]+(\.[0-9]+)*$"#, options: .regularExpression) != nil
+            else { throw fail("minAppVersion 必须是形如 \"1.5.3\" 的版本号") }
+            // Unset in tests and other bundles without a version: skip the check there.
+            if let app = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, compareVersions(v, app) > 0 {
+                throw fail("这个皮肤需要 KuroCat \(v) 或更新版本（当前 \(app)），请先升级 KuroCat")
+            }
+        }
 
         var spec = SkinSpec()
         guard let name = root["name"] as? String else { throw fail("缺少皮肤名称 name") }
@@ -1993,7 +2083,7 @@ struct SkinSpec {
         // Marks (polygons / strokes, same model as the built-in CoatMark artwork)
         if let marksAny = root["marks"], !isNull(marksAny) {
             guard let marks = marksAny as? [Any] else { throw fail("marks 必须是数组") }
-            if marks.count > 256 { throw fail("marks 最多 256 条") }
+            if marks.count > maxMarks { throw fail("marks 最多 \(maxMarks) 条") }
             for (i, mAny) in marks.enumerated() {
                 let f = "marks[\(i)]"
                 guard let m = mAny as? [String: Any] else { throw fail("\(f) 必须是对象") }
@@ -2431,3 +2521,23 @@ final class KeyboardSkinLibrary {
         return ok
     }
 }
+
+// <rig:generated> generated by scripts/gen-rig.py from shared/rig.json; edit that file, not this block
+enum KuroRig {
+    static let canvasWidth: CGFloat = 360.0
+    static let canvasHeight: CGFloat = 320.0
+    static let seatX: CGFloat = 184.0
+    static let seatY: CGFloat = 226.0
+    static let yawPerUnit: CGFloat = 0.5
+    static let pitchPerUnit: CGFloat = 0.36
+    static let maxHeadYaw: CGFloat = 1.0
+    static let headShiftPerYaw: CGFloat = 7.5
+    static let domeRadiusX: CGFloat = 46.0
+    static let domeRadiusY: CGFloat = 40.0
+    static let domeDepth: CGFloat = 29.6
+    static let planeDepth: CGFloat = 27.5
+    static let lieSquash: CGFloat = 0.42
+    static let squashWiden: CGFloat = 0.55
+    static let lieWiden: CGFloat = 0.03
+}
+// </rig:generated>

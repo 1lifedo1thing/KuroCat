@@ -315,7 +315,7 @@ enum CatRenderer {
         let settings = CatSettings.shared
         let flipped = isPreview ? false : settings.flipHorizontal
         let rotationDeg: CGFloat = isPreview ? 0.0 : settings.rotationDeg
-        let showEdit = !isPreview && settings.isEditMode
+        let showEdit = !isPreview && settings.isEditMode && !seatedOnlyPass
         if showEdit {
             drawEditOverlay(in: ctx, isEnglish: settings.isEnglish, scale: settings.scale, rotationDeg: rotationDeg, flipped: flipped)
         }
@@ -340,6 +340,9 @@ enum CatRenderer {
     }
 
     /// Main 60fps draw routine in flipped 360x320 logical coordinate space.
+    /// True while draw() re-enters itself to paint the seated pose underneath a fading scruff-lift pose.
+    private static var seatedOnlyPass = false
+
     static func draw(in ctx: CGContext, physics: CatPhysics, showPermissionPill: Bool,
                      permissionPillText: String = "点击开启全局/游戏键盘监听 🔑",
                      isPreview: Bool = false) {
@@ -415,7 +418,24 @@ enum CatRenderer {
 
         // Universal Scruff-Lifted Drag Pose (ALL non-Douni cat skins keep their own authentic KuroCat face/head/ears/markings in front,
         // carrying their keyboard & mouse/tablet+stylus cleanly with 2D pendulum inertia!)
-        if scruff > 0.005 {
+        if scruff > 0.005 && !seatedOnlyPass {
+            // Cross-fade: the seated cat (rising with the lift) fades out under the hanging cat, and back in on drop.
+            let hangAlpha = smoothstep(0.0, 0.45, scruff)
+            if hangAlpha < 0.995 {
+                if hasCanvasTransform { ctx.restoreGState() }
+                ctx.saveGState()
+                ctx.setAlpha(1.0 - hangAlpha)
+                ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+                seatedOnlyPass = true
+                draw(in: ctx, physics: physics, showPermissionPill: false, permissionPillText: permissionPillText, isPreview: isPreview)
+                seatedOnlyPass = false
+                ctx.endTransparencyLayer()
+                ctx.restoreGState()
+                if hasCanvasTransform {
+                    ctx.saveGState()
+                    applyCanvasTransform(in: ctx, flipped: flipped, rotationDeg: rotationDeg)
+                }
+            }
             drawNativeScruffDragCat(in: ctx, physics: physics, skin: skin, eyeTheme: settings.eyeTheme, lift: scruff,
                                     kbSkin: kbSkin, keyboardTheme: settings.keyboardTheme,
                                     showKeyLegends: settings.showKeyLegends, flipped: flipped,
@@ -627,7 +647,7 @@ enum CatRenderer {
         }
 
         // 8. Floating Mechanical Keycap Badges (keyboard + mouse clicks)
-        if !physics.floatingKeycaps.isEmpty {
+        if !physics.floatingKeycaps.isEmpty && !seatedOnlyPass {
             drawFloatingKeycaps(in: ctx, physics: physics, flipped: flipped)
         }
 
@@ -723,7 +743,7 @@ enum CatRenderer {
         let headLift: CGFloat = build(skin).headLift
         let scruff = max(0, min(1, physics.scruffDrag.value))
         return CGPoint(
-            x: CatPhysics.seatAnchor.x + physics.bodyShiftX.value + physics.bodyTilt.value * 36 + physics.headYaw.value * 7.5,
+            x: CatPhysics.seatAnchor.x + physics.bodyShiftX.value + physics.bodyTilt.value * 36 + physics.headYaw.value * KuroRig.headShiftPerYaw,
             y: 126 + headLift + physics.headOffsetY.value + physics.headPitch.value * 4.8 + physics.breathingOffset * 1.1 - scruff * 22.0
         )
     }
@@ -1664,8 +1684,8 @@ enum CatRenderer {
         let isDome: Bool
 
         init(yaw: CGFloat, pitch: CGFloat, tilt: CGFloat, headScale: CGFloat, isDome: Bool) {
-            let yawRad = yaw * 0.50
-            let pitchRad = pitch * 0.36
+            let yawRad = yaw * KuroRig.yawPerUnit
+            let pitchRad = pitch * KuroRig.pitchPerUnit
             self.cy = cos(yawRad)
             self.sy = sin(yawRad)
             self.cp = cos(pitchRad)
@@ -1683,13 +1703,13 @@ enum CatRenderer {
             } else {
                 let depth: CGFloat
                 if isDome {
-                    let rx = p.x / 46.0
-                    let ry = p.y / 40.0
+                    let rx = p.x / KuroRig.domeRadiusX
+                    let ry = p.y / KuroRig.domeRadiusY
                     let radius = max(0.0, 1.0 - rx * rx - ry * ry)
                     let surface = whiteSurface ? radius * radius * (3.0 - 2.0 * radius) : sqrt(radius)
-                    depth = 29.6 * surface
+                    depth = KuroRig.domeDepth * surface
                 } else {
-                    depth = 27.5
+                    depth = KuroRig.planeDepth
                 }
                 let x1 = p.x * cy + depth * sy
                 let z1 = -p.x * sy + depth * cy
@@ -1710,8 +1730,8 @@ enum CatRenderer {
         init(bodyWidth: CGFloat, bodySquash: CGFloat, lieIntensity: CGFloat, bodyTilt: CGFloat) {
             let lie = max(0.0, min(1.0, lieIntensity))
             let lieS = lie * lie * (3.0 - 2.0 * lie)
-            self.sy = bodySquash * (1.0 - lieS * 0.42)
-            let sx = (1.0 + (1.0 - bodySquash) * 0.55) * (1.0 + lieS * 0.03)
+            self.sy = bodySquash * (1.0 - lieS * KuroRig.lieSquash)
+            let sx = (1.0 + (1.0 - bodySquash) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
             self.sxTotal = bodyWidth * sx
             self.c = cos(bodyTilt)
             self.s = sin(bodyTilt)
@@ -2072,14 +2092,14 @@ enum CatRenderer {
 
     /// Head-local point -> canvas, on the skin's head surface (dome / plane) or flat skull space.
     private static func headPoint(_ p: CGPoint, skull: Bool, skin: SkinSpec, head: CGPoint, physics: CatPhysics, whiteSurface: Bool = false) -> CGPoint {
-        let rx = p.x / 46.0
-        let ry = p.y / 40.0
+        let rx = p.x / KuroRig.domeRadiusX
+        let ry = p.y / KuroRig.domeRadiusY
         let radius = max(0, 1 - rx * rx - ry * ry)
         let surface = whiteSurface ? radius * radius * (3 - 2 * radius) : sqrt(radius)
-        let depth: CGFloat = skin.headSurface == .dome ? 29.6 * surface : 27.5
+        let depth: CGFloat = skin.headSurface == .dome ? KuroRig.domeDepth * surface : KuroRig.planeDepth
         var projected = skull ? p : projectHead3D(x: p.x, y: p.y, z: depth,
-                                                  yawRad: physics.headYaw.value * 0.50,
-                                                  pitchRad: physics.headPitch.value * 0.36).pt
+                                                  yawRad: physics.headYaw.value * KuroRig.yawPerUnit,
+                                                  pitchRad: physics.headPitch.value * KuroRig.pitchPerUnit).pt
         let hs = skin.shape.headScale
         projected.x *= hs; projected.y *= hs
         let c = cos(physics.headTilt.value), s = sin(physics.headTilt.value)
@@ -2090,8 +2110,8 @@ enum CatRenderer {
         let bw = skin.shape.bodyWidth
         let lie = max(0, min(1, physics.lieIntensity.value))
         let lieS = lie * lie * (3.0 - 2.0 * lie)
-        let sy = physics.bodySquash.value * (1.0 - lieS * 0.42)
-        let sx = (1 + (1 - physics.bodySquash.value) * 0.55) * (1.0 + lieS * 0.03)
+        let sy = physics.bodySquash.value * (1.0 - lieS * KuroRig.lieSquash)
+        let sx = (1 + (1 - physics.bodySquash.value) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
         let c = cos(physics.bodyTilt.value), s = sin(physics.bodyTilt.value)
         return CGPoint(x: seatX + p.x*bw*sx*c - p.y*sy*s,
                        y: seatY + p.x*bw*sx*s + p.y*sy*c)
@@ -2433,8 +2453,8 @@ enum CatRenderer {
         let lie = max(0, min(1, physics.lieIntensity.value))
         let lieS = lie * lie * (3.0 - 2.0 * lie)
         let squash = physics.bodySquash.value
-        let sy = squash * (1.0 - lieS * 0.42)
-        let sx = (1.0 + (1.0 - squash) * 0.55) * (1.0 + lieS * 0.03)
+        let sy = squash * (1.0 - lieS * KuroRig.lieSquash)
+        let sx = (1.0 + (1.0 - squash) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
         let bTilt = physics.bodyTilt.value
         let cB = cos(bTilt), sB = sin(bTilt)
         func B(_ lx: CGFloat, _ ly: CGFloat) -> CGPoint {
@@ -2867,8 +2887,8 @@ enum CatRenderer {
         let cB = cos(bTilt), sB = sin(bTilt)
         let lie = max(0, min(1, physics.lieIntensity.value))
         let lieS = lie * lie * (3.0 - 2.0 * lie)
-        let sy = physics.bodySquash.value * (1.0 - lieS * 0.42)
-        let sx = (1.0 + (1.0 - physics.bodySquash.value) * 0.55) * (1.0 + lieS * 0.03)
+        let sy = physics.bodySquash.value * (1.0 - lieS * KuroRig.lieSquash)
+        let sx = (1.0 + (1.0 - physics.bodySquash.value) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
         func B(_ lx: CGFloat, _ ly: CGFloat) -> CGPoint {
             let rx = lx * bw * sx
             let ry = ly * sy
@@ -3035,8 +3055,8 @@ enum CatRenderer {
 
             if let point = pal.points {
                 let mid = pal.pointsMid ?? point
-                let yawRad = yaw * 0.50
-                let pitchRad = pitch * 0.36
+                let yawRad = yaw * KuroRig.yawPerUnit
+                let pitchRad = pitch * KuroRig.pitchPerUnit
                 let pointGrads = cachedPointsGradients(point: point, mid: mid, srgb: srgb)
                 ctx.saveGState()
                 ctx.translateBy(x: headCenter.x, y: headCenter.y)
@@ -3344,8 +3364,8 @@ enum CatRenderer {
         ctx.rotate(by: physics.headTilt.value)
         if skin.shape.headScale != 1 { ctx.scaleBy(x: skin.shape.headScale, y: skin.shape.headScale) }
 
-        let yawRad = physics.headYaw.value * 0.50
-        let pitchRad = physics.headPitch.value * 0.36
+        let yawRad = physics.headYaw.value * KuroRig.yawPerUnit
+        let pitchRad = physics.headPitch.value * KuroRig.pitchPerUnit
         let fold = physics.earFold.value
         let twitch = physics.earTwitch.value * 0.045
 
@@ -3495,8 +3515,8 @@ enum CatRenderer {
 
         let yaw = physics.headYaw.value      // -1 (left) .. +1 (right)
         let pitch = physics.headPitch.value  // -1 (up)   .. +1 (down)
-        let yawRad = yaw * 0.50              // ~±28.5° authentic head turn
-        let pitchRad = pitch * 0.36          // ~±20.5° authentic head nod
+        let yawRad = yaw * KuroRig.yawPerUnit              // ~±28.5° authentic head turn
+        let pitchRad = pitch * KuroRig.pitchPerUnit          // ~±20.5° authentic head nod
 
         if skin.renderStyle == .dazed {
             drawDazedFace(in: ctx, physics: physics, eyeTheme: eyeTheme, yawRad: yawRad, pitchRad: pitchRad, scruffStartle: scruffStartle, scruffWide: scruffWide)
@@ -4086,7 +4106,7 @@ enum CatRenderer {
     private static func drawDecorations(in ctx: CGContext, seatX: CGFloat, seatY: CGFloat, head: CGPoint, physics: CatPhysics, skin: SkinSpec,
                                         neckOverride: CGPoint? = nil, tailTipOverride: CGPoint? = nil,
                                         anchors: Set<SkinAnchorPoint>? = nil) {
-        let yawRad = physics.headYaw.value * 0.50, pitchRad = physics.headPitch.value * 0.36
+        let yawRad = physics.headYaw.value * KuroRig.yawPerUnit, pitchRad = physics.headPitch.value * KuroRig.pitchPerUnit
         for deco in skin.decorations {
             if let anchors = anchors, !anchors.contains(deco.anchor) { continue }
             var at = CGPoint.zero
@@ -4172,8 +4192,8 @@ enum CatRenderer {
         let faceClearance: CGFloat = (approved ? 52.0 : 51.0) + tiltChinDrop
         let faceBottom = headBottom + faceClearance
         func shoulder(_ x: CGFloat) -> CGPoint {
-            let sy = physics.bodySquash.value * (1.0 - lieS * 0.42)
-            let sx = (1.0 + (1.0 - physics.bodySquash.value) * 0.55) * (1.0 + lieS * 0.03)
+            let sy = physics.bodySquash.value * (1.0 - lieS * KuroRig.lieSquash)
+            let sx = (1.0 + (1.0 - physics.bodySquash.value) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
             let c = cos(physics.bodyTilt.value), s = sin(physics.bodyTilt.value)
             return CGPoint(x: seatX + x*sx*c + shoulderDepth*sy*s,
                            y: max(seatY + x*sx*s - shoulderDepth*sy*c, faceBottom - max(0, -armRY) * 0.6))
@@ -8078,30 +8098,28 @@ enum CatRenderer {
     ) {
         let carry = smoothstep(0.0, 0.90, lift)
         let liftS = smoothstep(0.0, 1.0, lift)
-        let startle: CGFloat
-        if physics.isScruffDragging {
-            if physics.scruffHoldTime < 0.14 {
-                startle = 1.0
-            } else {
-                startle = max(0, 1.0 - (physics.scruffHoldTime - 0.14) / 0.08)
-            }
-        } else {
-            startle = (physics.scruffDropTimer > 0.01) ? min(1.0, physics.scruffDropTimer / 0.12) : 1.0
-        }
+        // startle = 1: compact "just grabbed / just set down" pose, 0: fully limp hang. Eased both ways, never switched.
+        let startle: CGFloat = physics.isScruffDragging
+            ? 1.0 - smoothstep(0.0, 0.45, physics.scruffHoldTime)
+            : smoothstep(0.0, 1.0, 1.0 - physics.scruffDropTimer / 0.16)
 
-        // Lively 2D drag inertia: limbs, lower torso & tail trail behind fast motion and rebound softly!
-        let swingH = max(-1.0, min(1.0, physics.scruffSwing.value))
-        let swingY = max(-0.92, min(0.92, physics.scruffSwingY.value))
-        let tailSwing = max(-1.25, min(1.25, physics.scruffTailSwing.value))
-        let idleSway = sin(physics.time * 4.2) * 0.045 * (1.0 - startle)
-        let limbSwing = max(-0.82, min(0.82, swingH * 0.85)) * (1.0 - startle * 0.45) + idleSway
+        // Pendulum state (CatPhysics.stepDangle). dangle* angles are + toward canvas right; CG rotations here are
+        // + clockwise (a hanging vector swings left), hence the sign flips below.
+        let theta = max(-0.9, min(0.9, physics.dangleAngle))
+        let thetaVel = max(-8.0, min(8.0, physics.dangleAngVel))
+        let legRel = max(-0.9, min(0.9, physics.dangleLeg - theta))
+        let tailRelA = max(-1.2, min(1.2, physics.dangleTailA - theta))
+        let tailRelB = max(-1.4, min(1.4, physics.dangleTailB - theta))
+        let swingY = max(-0.92, min(0.92, physics.dangleStretch * 3.5))
+        let idleSway = sin(physics.time * 4.2) * 0.03 * (1.0 - startle)
+        let limbSwing = max(-0.82, min(0.82, -legRel)) + idleSway
         let upBillow = max(0, -swingY)
 
         let pal = skin.palette
         let bd = build(skin)
         let hs = skin.shape.headScale
         let bw = skin.shape.bodyWidth
-        let nw = skin.shape.neckWidth
+        let _ = skin.shape.neckWidth
         let isDazed = (skin.renderStyle == .dazed)
         let isBlackRim = isClassicBlackRim(skin)
         let srgb = usesSRGB(skin)
@@ -8116,11 +8134,13 @@ enum CatRenderer {
         let limbWScale = max(0.72, min(1.30, (bd.limbStartW / 19.0) * (1.0 + plump * 0.62)))
         let limbLenScale = max(0.84, min(1.18, 1.0 - plump * 0.28 + (isSleek ? 0.07 : 0.0)))
 
-        let baseShiftX = physics.bodyShiftX.value + swingH * 10.0
-        let liftY = -liftS * 12.0 + sin(physics.time * 3.8) * 2.0 * (1.0 - startle) + swingY * 5.0
+        let baseShiftX = physics.bodyShiftX.value
+        let liftY = -liftS * 8.0 + sin(physics.time * 3.8) * 1.8 * (1.0 - startle) + swingY * 5.0
+        // Gentle forward-pitched scruff-held liquid cat:
+        // Round head leans slightly forward-downward; nape pinch slopes gently at ~50 deg into an arched back.
         let headCenter = CGPoint(
-            x: 180.0 + baseShiftX,
-            y: lerp(94.0, 108.0, startle) + liftY + (hs - 1.0) * 6.0
+            x: 192.0 + baseShiftX,
+            y: lerp(104.0, 112.0, startle) + liftY + (hs - 1.0) * 6.0
         )
 
         let cheekHalfW = bd.cheekHalfW * skin.shape.cheekFullness * hs
@@ -8128,19 +8148,18 @@ enum CatRenderer {
         let cheekY = bd.cheekY * hs
         let chinY = 33.0 * hs
 
-        // Soft lifted scruff fur gather right between the ears (gentle rounded pinch — never pointy, never overlaps ears!)
-        let scruffTuftH = lerp(6.2, 3.8, startle) * hs
-        let scruffPinch = CGPoint(x: headCenter.x, y: headCenter.y + crownY - scruffTuftH)
+        // Short, natural rounded nape pinch tucked behind the left ear (drawn BEHIND the ears & head!)
+        let scruffTuftH = lerp(13.0, 9.0, startle) * hs
+        let scruffPinch = CGPoint(x: headCenter.x - 35.0 * hs, y: headCenter.y + crownY - scruffTuftH)
 
-        // Stretched hanging torso dimensions & soft spinal lag curve
-        let torsoLen = lerp(124.0 - plump * 18.0 + (isSleek ? 10.0 : 0.0), 104.0 - plump * 12.0, startle) * (1.0 + swingY * 0.08)
+        // Stretched hanging torso dimensions & gentle C-curved spine
+        let torsoLen = lerp(124.0 - plump * 12.0 + (isSleek ? 10.0 : 0.0), 108.0 - plump * 10.0, startle) * (1.0 + swingY * 0.08)
         let torsoBottomY = headCenter.y + torsoLen
-        let hipLagX = (swingH * 22.0 + idleSway * 16.0) * (1.0 - startle * 0.35)
+        let hipLagX = -28.0 + max(-18.0, min(18.0, -thetaVel * 7.0)) + idleSway * 12.0  // rump trails the swing
 
-        let neckHalfW = max(18.0 * hs, (cheekHalfW - bd.neckPinchX * hs) * nw)
-        let waistHalfW = bd.waistCtrlW * bw * lerp(0.84 + plump * 0.24, 0.92 + plump * 0.20, startle)
-        let hipHalfW = bd.hipHalfW * bw * lerp(0.95 + plump * 0.26, 1.00 + plump * 0.20, startle)
-        let bottomDip: CGFloat = 12.0 + max(0.0, plump) * 14.0
+        let waistHalfW = bd.waistCtrlW * bw * lerp(0.84 + plump * 0.16, 0.90 + plump * 0.14, startle)
+        let hipHalfW = bd.hipHalfW * bw * lerp(0.88 + plump * 0.18, 0.94 + plump * 0.14, startle)
+        let bottomDip: CGFloat = 10.0 + max(0.0, plump) * 10.0
         let rumpCenterX = headCenter.x + hipLagX
 
         func rot(_ pt: CGPoint, around pivot: CGPoint, angle: CGFloat) -> CGPoint {
@@ -8149,97 +8168,138 @@ enum CatRenderer {
             return CGPoint(x: pivot.x + dx * c - dy * s, y: pivot.y + dx * s + dy * c)
         }
 
-        // 1. Unified front-facing long-cat silhouette: subtle lifted scruff tuft between ears + native cheeks + seamless stretched torso
+        // 1. Gentle G1-continuous 3/4 scruff-lifted body+head silhouette (normal smooth crown, zero double-chin)
         let longCatPath = CGMutablePath()
         do {
-            let tuftBaseX = min(12.5 * hs, cheekHalfW * 0.31)
             let rCheekX = headCenter.x + cheekHalfW
-            let lCheekX = headCenter.x - cheekHalfW
             let cheekPosY = headCenter.y + cheekY
-            let neckCtrlY = headCenter.y + bd.neckCtrlY * hs
-            let waistY = headCenter.y + torsoLen * 0.48
+            // Single smooth concave neck-hollow transition right under the jawline (G1 tangent continuity)
+            let throatPt = CGPoint(x: headCenter.x + cheekHalfW * 0.44, y: headCenter.y + chinY - 1.5 * hs)
+            let waistY = headCenter.y + torsoLen * 0.50
             let hipY = torsoBottomY - 14.0
-            let waistCenterX = headCenter.x + hipLagX * 0.34
-            let botHalf = hipHalfW * 0.62
+            let waistCenterX = headCenter.x + hipLagX * 0.56
+            let botHalf = hipHalfW * 0.58
 
-            longCatPath.move(to: scruffPinch)
-            longCatPath.addCurve(
-                to: CGPoint(x: headCenter.x + tuftBaseX, y: headCenter.y + crownY + 0.5 * hs),
-                control1: CGPoint(x: headCenter.x + tuftBaseX * 0.56, y: scruffPinch.y + scruffTuftH * 0.06),
-                control2: CGPoint(x: headCenter.x + tuftBaseX * 0.80, y: headCenter.y + crownY - scruffTuftH * 0.14)
-            )
+            longCatPath.move(to: CGPoint(x: headCenter.x, y: headCenter.y + crownY))
+            // Intact round head crown -> round right cheek
             longCatPath.addCurve(
                 to: CGPoint(x: rCheekX, y: cheekPosY),
                 control1: CGPoint(x: headCenter.x + bd.crownCtrlW * hs, y: headCenter.y + crownY),
                 control2: CGPoint(x: rCheekX + 1.5 * hs, y: headCenter.y + bd.cheekCtrlTopY * hs)
             )
+            // G1-continuous chin -> throat hollow -> soft forward chest (strictly monotonic, no double-chin tuck!)
             longCatPath.addCurve(
-                to: CGPoint(x: rumpCenterX + hipHalfW, y: hipY),
-                control1: CGPoint(x: headCenter.x + neckHalfW, y: neckCtrlY),
-                control2: CGPoint(x: waistCenterX + waistHalfW, y: waistY)
+                to: throatPt,
+                control1: CGPoint(x: rCheekX - 1.0 * hs, y: cheekPosY + 15.0 * hs),
+                control2: CGPoint(x: throatPt.x + 12.0 * hs, y: throatPt.y - 4.0 * hs)
             )
             longCatPath.addCurve(
+                to: CGPoint(x: rumpCenterX + hipHalfW, y: hipY),
+                control1: CGPoint(x: throatPt.x - 9.0 * hs, y: throatPt.y + 3.0 * hs),
+                control2: CGPoint(x: waistCenterX + waistHalfW * 1.04, y: waistY - 2.0)
+            )
+            // Rounded bottom rump hem
+            longCatPath.addCurve(
                 to: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip),
-                control1: CGPoint(x: rumpCenterX + hipHalfW * 0.96, y: torsoBottomY + bottomDip * 0.55),
+                control1: CGPoint(x: rumpCenterX + hipHalfW * 0.94, y: torsoBottomY + bottomDip * 0.58),
                 control2: CGPoint(x: rumpCenterX + botHalf, y: torsoBottomY + bottomDip)
             )
             longCatPath.addCurve(
                 to: CGPoint(x: rumpCenterX - hipHalfW, y: hipY),
                 control1: CGPoint(x: rumpCenterX - botHalf, y: torsoBottomY + bottomDip),
-                control2: CGPoint(x: rumpCenterX - hipHalfW * 0.96, y: torsoBottomY + bottomDip * 0.55)
+                control2: CGPoint(x: rumpCenterX - hipHalfW * 0.94, y: torsoBottomY + bottomDip * 0.58)
             )
+            // The back rises in one smooth line straight up into the pinched nape skin (the hand is the top of the
+            // back), then the skin tent eases back down onto the crown behind the left ear.
+            let pinchL = CGPoint(x: scruffPinch.x - 5.0 * hs, y: scruffPinch.y + 2.5 * hs)
+            let pinchR = CGPoint(x: scruffPinch.x + 5.0 * hs, y: scruffPinch.y + 2.5 * hs)
             longCatPath.addCurve(
-                to: CGPoint(x: lCheekX, y: cheekPosY),
-                control1: CGPoint(x: waistCenterX - waistHalfW, y: waistY),
-                control2: CGPoint(x: headCenter.x - neckHalfW, y: neckCtrlY)
+                to: pinchL,
+                control1: CGPoint(x: rumpCenterX - hipHalfW * 1.10, y: waistY + 6.0),
+                control2: CGPoint(x: pinchL.x - 26.0 * hs + hipLagX * 0.25, y: pinchL.y + 46.0 * hs)
             )
+            longCatPath.addQuadCurve(to: pinchR, control: CGPoint(x: scruffPinch.x, y: scruffPinch.y - 2.5 * hs))
             longCatPath.addCurve(
-                to: CGPoint(x: headCenter.x - tuftBaseX, y: headCenter.y + crownY + 0.5 * hs),
-                control1: CGPoint(x: lCheekX - 1.5 * hs, y: headCenter.y + bd.cheekCtrlTopY * hs),
-                control2: CGPoint(x: headCenter.x - bd.crownCtrlW * hs, y: headCenter.y + crownY)
-            )
-            longCatPath.addCurve(
-                to: scruffPinch,
-                control1: CGPoint(x: headCenter.x - tuftBaseX * 0.80, y: headCenter.y + crownY - scruffTuftH * 0.14),
-                control2: CGPoint(x: headCenter.x - tuftBaseX * 0.56, y: scruffPinch.y + scruffTuftH * 0.06)
+                to: CGPoint(x: headCenter.x, y: headCenter.y + crownY),
+                control1: CGPoint(x: pinchR.x + 4.0 * hs, y: pinchR.y + 3.0 * hs),
+                control2: CGPoint(x: headCenter.x - bd.crownCtrlW * hs * 0.85, y: headCenter.y + crownY - 0.5 * hs)
             )
             longCatPath.closeSubpath()
         }
 
-        // Exact 1:1 front-view body mapping: seated body y in [-98..+12] stretches smoothly along the hanging torso
-        // and follows both body width envelope & spinal sway so every calico/tuxedo/vest/brush pattern bends cleanly!
-        let dragBodyMap: (CGPoint) -> CGPoint = { pt in
-            let u = (pt.y + 98.0) / 110.0
-            let uC = max(0.0, min(1.15, u))
-            let ySpan = (torsoBottomY + bottomDip * 0.78) - headCenter.y
-            let mappedY = headCenter.y + u * ySpan
-            let baseRefW = max(1.0, bd.hipHalfW * bw)
-            let targetW = lerp(waistHalfW / max(1.0, bd.waistCtrlW * bw), hipHalfW / baseRefW, smoothstep(0.35, 0.95, uC))
-            let wScale = lerp(1.0, targetW, smoothstep(0.18, 0.55, uC))
-            let swayX = hipLagX * uC * uC
-            return CGPoint(x: headCenter.x + pt.x * bw * wScale + swayX, y: mappedY)
+        // Head disc alone (same crown/cheek/chin curves as the silhouette): repainted over the ears so the left ear
+        // stands in front of the pinched nape skin but behind the head, exactly like the seated pose.
+        let headOnlyPath = CGMutablePath()
+        let headLeftRimPath = CGMutablePath()
+        do {
+            let rCheekX = headCenter.x + cheekHalfW
+            let lCheekX = headCenter.x - cheekHalfW
+            let cheekPosY = headCenter.y + cheekY
+            headOnlyPath.move(to: CGPoint(x: headCenter.x, y: headCenter.y + crownY))
+            headOnlyPath.addCurve(to: CGPoint(x: rCheekX, y: cheekPosY),
+                                  control1: CGPoint(x: headCenter.x + bd.crownCtrlW * hs, y: headCenter.y + crownY),
+                                  control2: CGPoint(x: rCheekX + 1.5 * hs, y: headCenter.y + bd.cheekCtrlTopY * hs))
+            headOnlyPath.addCurve(to: CGPoint(x: headCenter.x, y: headCenter.y + chinY),
+                                  control1: CGPoint(x: rCheekX - 0.5 * hs, y: cheekPosY + 19.0 * hs),
+                                  control2: CGPoint(x: headCenter.x + cheekHalfW * 0.56, y: headCenter.y + chinY))
+            headOnlyPath.addCurve(to: CGPoint(x: lCheekX, y: cheekPosY),
+                                  control1: CGPoint(x: headCenter.x - cheekHalfW * 0.56, y: headCenter.y + chinY),
+                                  control2: CGPoint(x: lCheekX + 0.5 * hs, y: cheekPosY + 19.0 * hs))
+            headOnlyPath.addCurve(to: CGPoint(x: headCenter.x, y: headCenter.y + crownY),
+                                  control1: CGPoint(x: lCheekX - 1.5 * hs, y: headCenter.y + bd.cheekCtrlTopY * hs),
+                                  control2: CGPoint(x: headCenter.x - bd.crownCtrlW * hs, y: headCenter.y + crownY))
+            headOnlyPath.closeSubpath()
+            // Left half of the head rim (under the chin -> left cheek -> crown): the edge that reads against the back.
+            headLeftRimPath.move(to: CGPoint(x: headCenter.x - cheekHalfW * 0.30, y: headCenter.y + chinY - 1.0 * hs))
+            headLeftRimPath.addCurve(to: CGPoint(x: lCheekX, y: cheekPosY),
+                                     control1: CGPoint(x: headCenter.x - cheekHalfW * 0.62, y: headCenter.y + chinY - 1.5 * hs),
+                                     control2: CGPoint(x: lCheekX + 0.5 * hs, y: cheekPosY + 19.0 * hs))
+            headLeftRimPath.addCurve(to: CGPoint(x: headCenter.x, y: headCenter.y + crownY),
+                                     control1: CGPoint(x: lCheekX - 1.5 * hs, y: headCenter.y + bd.cheekCtrlTopY * hs),
+                                     control2: CGPoint(x: headCenter.x - bd.crownCtrlW * hs, y: headCenter.y + crownY))
         }
 
-        // 2. Dangling limp tail emerging from lower-right behind the hip with graceful outward separation from right hind paw
-        let tailPivot = CGPoint(x: rumpCenterX + hipHalfW * 0.60, y: torsoBottomY - 16.0)
-        let tailLen: CGFloat = 76.0 * skin.shape.tailLength * (1.0 + swingY * 0.14)
-        let tailW: CGFloat = max(8.0, (isDazed ? 13.0 : bd.tailWidth * skin.shape.tailThickness) * 1.08)
-        let rawTailAng = (tailSwing * (1.0 - startle * 0.25) + idleSway * 1.5) * 0.85
-        let tailAng = max(-1.05, min(0.75, rawTailAng))
-        let baseC1 = CGPoint(x: tailPivot.x + 26 + upBillow * 10, y: tailPivot.y + tailLen * 0.22 - upBillow * 10)
-        let baseC2 = CGPoint(x: tailPivot.x + 36 + upBillow * 18, y: tailPivot.y + tailLen * 0.64 - upBillow * 26)
-        let baseTip = CGPoint(x: tailPivot.x + 24 + upBillow * 24, y: tailPivot.y + tailLen - upBillow * 40)
-        let tailC1 = rot(baseC1, around: tailPivot, angle: tailAng * 0.45)
-        let tailC2 = rot(baseC2, around: tailPivot, angle: tailAng * 0.92)
-        let tailTip = rot(baseTip, around: tailPivot, angle: tailAng * 1.26)
+        // Spine-centered body map: centers body marks/vests cleanly along the true arched spine midline
+        // so wide-body skins (e.g. corgi bw=1.35) keep balanced fur borders on both sides & bottom!
+        let dragBodyMap: (CGPoint) -> CGPoint = { pt in
+            let jawBodyY: CGFloat = -102.0 + 34.0 * hs
+            let torsoSpan = max(1.0, 12.0 - jawBodyY)
+            let dragTopY = headCenter.y + chinY - 2.0 * hs
+            let dragBotY = torsoBottomY + bottomDip * 0.60
+            let u: CGFloat
+            if pt.y <= jawBodyY {
+                let headU = (pt.y + 102.0) / max(1.0, 34.0 * hs)
+                u = (headU - 1.0) * 0.22
+            } else {
+                let rawU = (pt.y - jawBodyY) / torsoSpan
+                u = rawU <= 1.0 ? rawU : (1.0 + (rawU - 1.0) * 0.35)
+            }
+            let uC = max(0.0, min(1.05, u))
+            let mappedY = dragTopY + u * (dragBotY - dragTopY)
+            let midX = lerp(headCenter.x, rumpCenterX, smoothstep(0.0, 0.92, uC)) - 4.0 * sin(.pi * min(1.0, uC))
+            let baseRefW = max(1.0, bd.hipHalfW * bw)
+            let envW = lerp(waistHalfW * 0.92, hipHalfW * 0.92, smoothstep(0.25, 0.92, uC))
+            let xScale = (envW / baseRefW) * bw
+            return CGPoint(x: midX + pt.x * xScale, y: mappedY)
+        }
+
+        // 2. Soft drooping tail emerging cleanly along the lower-left back curve (just like reference!)
+        let tailPivot = CGPoint(x: rumpCenterX - hipHalfW * 0.72, y: torsoBottomY - 18.0)
+        let tailLen: CGFloat = 82.0 * skin.shape.tailLength * (1.0 + swingY * 0.14)
+        let tailW: CGFloat = max(8.0, (isDazed ? 13.0 : bd.tailWidth * skin.shape.tailThickness) * 1.00)
+        let tailAngA = max(-0.95, min(0.95, -tailRelA + idleSway * 1.2))
+        let tailAngB = max(-1.1, min(1.1, -tailRelB + idleSway * 1.5))
+        let baseC1 = CGPoint(x: tailPivot.x - 18 - upBillow * 10, y: tailPivot.y + tailLen * 0.30 - upBillow * 8)
+        let baseC2 = CGPoint(x: tailPivot.x - 16 - upBillow * 14, y: tailPivot.y + tailLen * 0.72 - upBillow * 20)
+        let baseTip = CGPoint(x: tailPivot.x - 2 - upBillow * 18, y: tailPivot.y + tailLen - upBillow * 30)
+        let tailC1 = rot(baseC1, around: tailPivot, angle: tailAngA * 0.70)
+        let tailC2 = rot(baseC2, around: tailPivot, angle: lerp(tailAngA, tailAngB, 0.6))
+        let tailTip = rot(baseTip, around: tailPivot, angle: tailAngB * 1.10)
         let tailCurvePath = CGMutablePath()
         tailCurvePath.move(to: tailPivot)
         tailCurvePath.addCurve(to: tailTip, control1: tailC1, control2: tailC2)
 
-        // 3. Four symmetric front-facing dangling limbs:
-        //    - Front arms root snugly along the outer shoulder slopes and drape softly downward/slightly inward,
-        //      leaving the central chest 100% unobstructed for vests/bibs/calico/brush art!
-        //    - Hind legs emerge cleanly from the lower rounded belly hem with soft natural splay.
+        // 3. Four limp dangling limbs curving naturally forward-downward (matching reference silhouette!)
         struct DragLimb {
             let root, tip: CGPoint
             let startW, endW: CGFloat
@@ -8262,47 +8322,49 @@ enum CatRenderer {
                 x: r.x + (baseTip.x - r.x) * lenFactor,
                 y: r.y + (baseTip.y - r.y) * lenFactor - upBillow * 6.0
             )
-            let ang = limbSwing * swingScale + upBillow * 0.20 * splayDir
+            let ang = limbSwing * (0.55 + swingScale * 0.6) + upBillow * 0.20 * splayDir
             let t = rot(stretched, around: r, angle: ang)
             let dynBendX = bendX + limbSwing * 11.0 * swingScale
             return DragLimb(root: r, tip: t, startW: w0 * limbWScale, endW: w1 * limbWScale, bendX: dynBendX, armSpace: armSpace, isBehindBody: isBehindBody)
         }
 
-        let shoulderY = headCenter.y + 42.0 * hs
-        // Tuck front-arm roots cleanly INSIDE the torso silhouette so shoulders NEVER bulge outside the body!
-        let shoulderInX = max(12.0 * hs, min(neckHalfW * 0.72, waistHalfW * 0.56))
-        let armLen: CGFloat = 56.0
+        let isPureLift = CatSettings.shared.pureScruffDrag
+        let deskSpread: CGFloat = isPureLift ? 0.0 : carry
+        let shoulderY = headCenter.y + 38.0 * hs
+        let armLen: CGFloat = 58.0
+        // Left front arm hangs softly in front of the arched chest; spreads slightly left when holding mouse
         let frontLeftLimb = makeLimb(
-            rootA: CGPoint(x: headCenter.x - shoulderInX + hipLagX * 0.16, y: shoulderY),
-            tipA: CGPoint(x: headCenter.x - shoulderInX + 1.5 - carry * 20.0 + hipLagX * 0.30, y: shoulderY + armLen + carry * 4.0),
-            rootB: CGPoint(x: headCenter.x - shoulderInX + hipLagX * 0.12, y: shoulderY + 3.0),
-            tipB: CGPoint(x: headCenter.x - shoulderInX - 4.0 - carry * 20.0 + hipLagX * 0.22, y: shoulderY + armLen * 0.84 + carry * 4.0),
-            w0: 13.6, w1: 12.4, bendX: -1.5, swingScale: 0.42, splayDir: -0.65, armSpace: .leftArm
+            rootA: CGPoint(x: headCenter.x - 28.0 * hs + hipLagX * 0.12, y: shoulderY + 4.0),
+            tipA: CGPoint(x: headCenter.x - 20.0 * hs - deskSpread * 18.0 + hipLagX * 0.08, y: shoulderY + armLen + 4.0),
+            rootB: CGPoint(x: headCenter.x - 28.0 * hs + hipLagX * 0.10, y: shoulderY + 6.0),
+            tipB: CGPoint(x: headCenter.x - 22.0 * hs - deskSpread * 18.0 + hipLagX * 0.06, y: shoulderY + armLen * 0.86 + 4.0),
+            w0: 14.5, w1: 12.8, bendX: 7.0, swingScale: 0.42, splayDir: -0.45, armSpace: .leftArm
         )
+        // Right front arm emerges cleanly below chest & drapes freely forward-right without intruding into chin!
         let frontRightLimb = makeLimb(
-            rootA: CGPoint(x: headCenter.x + shoulderInX + hipLagX * 0.16, y: shoulderY),
-            tipA: CGPoint(x: headCenter.x + shoulderInX - 1.5 + carry * 8.0 + hipLagX * 0.30, y: shoulderY + armLen + carry * 4.0),
-            rootB: CGPoint(x: headCenter.x + shoulderInX + hipLagX * 0.12, y: shoulderY + 3.0),
-            tipB: CGPoint(x: headCenter.x + shoulderInX + 4.0 + carry * 8.0 + hipLagX * 0.22, y: shoulderY + armLen * 0.84 + carry * 4.0),
-            w0: 13.6, w1: 12.4, bendX: 1.5, swingScale: 0.42, splayDir: 0.65, armSpace: .rightArm
+            rootA: CGPoint(x: headCenter.x + 2.0 * hs + hipLagX * 0.14, y: shoulderY + 4.0),
+            tipA: CGPoint(x: headCenter.x + 12.0 * hs + deskSpread * 14.0 + hipLagX * 0.08, y: shoulderY + armLen - 2.0),
+            rootB: CGPoint(x: headCenter.x + 2.0 * hs + hipLagX * 0.12, y: shoulderY + 6.0),
+            tipB: CGPoint(x: headCenter.x + 11.0 * hs + deskSpread * 14.0 + hipLagX * 0.06, y: shoulderY + armLen * 0.86 - 2.0),
+            w0: 14.5, w1: 12.8, bendX: 7.5, swingScale: 0.42, splayDir: 0.45, armSpace: .rightArm
         )
 
-        let hindRootX = max(13.0, hipHalfW * 0.42)
-        let hindRootY = torsoBottomY + bottomDip * 0.20 - 12.0
+        let hindRootX = max(13.0, hipHalfW * 0.44)
+        let hindRootY = torsoBottomY + bottomDip * 0.12 - 14.0
         let hindLen: CGFloat = 46.0
         let backLeftLimb = makeLimb(
-            rootA: CGPoint(x: rumpCenterX - hindRootX, y: hindRootY),
-            tipA: CGPoint(x: rumpCenterX - hindRootX - 2.5, y: hindRootY + hindLen),
-            rootB: CGPoint(x: rumpCenterX - hindRootX - 1.0, y: hindRootY - 3.0),
-            tipB: CGPoint(x: rumpCenterX - hindRootX - 7.5, y: hindRootY + hindLen * 0.80),
-            w0: 15.2, w1: 12.8, bendX: -1.5, swingScale: 0.68, splayDir: -0.65, armSpace: .hindLeg, isBehindBody: true
+            rootA: CGPoint(x: rumpCenterX - hindRootX + 2.0, y: hindRootY),
+            tipA: CGPoint(x: rumpCenterX - hindRootX + 12.0, y: hindRootY + hindLen),
+            rootB: CGPoint(x: rumpCenterX - hindRootX + 1.0, y: hindRootY - 3.0),
+            tipB: CGPoint(x: rumpCenterX - hindRootX + 8.0, y: hindRootY + hindLen * 0.84),
+            w0: 15.0, w1: 12.4, bendX: 7.5, swingScale: 0.68, splayDir: -0.45, armSpace: .hindLeg, isBehindBody: true
         )
         let backRightLimb = makeLimb(
-            rootA: CGPoint(x: rumpCenterX + hindRootX, y: hindRootY),
-            tipA: CGPoint(x: rumpCenterX + hindRootX + 2.5, y: hindRootY + hindLen),
-            rootB: CGPoint(x: rumpCenterX + hindRootX + 1.0, y: hindRootY - 3.0),
-            tipB: CGPoint(x: rumpCenterX + hindRootX + 7.5, y: hindRootY + hindLen * 0.80),
-            w0: 15.2, w1: 12.8, bendX: 1.5, swingScale: 0.68, splayDir: 0.65, armSpace: .hindLeg, isBehindBody: true
+            rootA: CGPoint(x: rumpCenterX + hindRootX - 4.0, y: hindRootY - 2.0),
+            tipA: CGPoint(x: rumpCenterX + hindRootX + 10.0, y: hindRootY + hindLen - 4.0),
+            rootB: CGPoint(x: rumpCenterX + hindRootX - 4.0, y: hindRootY - 4.0),
+            tipB: CGPoint(x: rumpCenterX + hindRootX + 11.0, y: hindRootY + hindLen * 0.82),
+            w0: 15.0, w1: 12.4, bendX: 8.5, swingScale: 0.68, splayDir: 0.45, armSpace: .hindLeg, isBehindBody: true
         )
 
         struct LimbGeo {
@@ -8334,8 +8396,8 @@ enum CatRenderer {
             let closed = rim.mutableCopy()!
             closed.addCurve(
                 to: p0L,
-                control1: CGPoint(x: p0R.x - ux * r0 * 0.85, y: p0R.y - uy * r0 * 0.85),
-                control2: CGPoint(x: p0L.x - ux * r0 * 0.85, y: p0L.y - uy * r0 * 0.85)
+                control1: CGPoint(x: p0R.x - ux * r0 * 0.40, y: p0R.y - uy * r0 * 0.40),
+                control2: CGPoint(x: p0L.x - ux * r0 * 0.40, y: p0L.y - uy * r0 * 0.40)
             )
             closed.closeSubpath()
 
@@ -8410,27 +8472,15 @@ enum CatRenderer {
             } else if let armSpace = limb.armSpace, let limbGrad = skin.partGradients[armSpace.rawValue] {
                 drawClampedPartGradient(in: ctx, limbGrad, start: limb.root, end: limb.tip, srgb: srgb)
             } else if !limb.isBehindBody {
-                let legCol = pal.legs
-                let pawCol = pal.paws
-                if let chest = pal.belly, chest != legCol {
-                    if pawCol != legCol {
-                        let cols = [sc(chest, skin).cgColor, sc(legCol, skin).cgColor, sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
-                        if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.30, 0.68, 0.84]) {
-                            ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-                        }
-                    } else {
-                        let cols = [sc(chest, skin).cgColor, sc(legCol, skin).cgColor] as CFArray
-                        if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.30]) {
-                            ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-                        }
-                    }
-                } else if pawCol != legCol {
-                    let cols = [sc(legCol, skin).cgColor, sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
-                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.68, 0.84]) {
-                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                // Match seated drawIdleFrontLeg 1:1 without solid beige shoulder cap over chest fur!
+                if let armSpace = limb.armSpace, skin.partGradients[armSpace.rawValue] == nil, skin.idleLegsTinted {
+                    let legCols = [sc(pal.legs, 0.0, skin).cgColor, sc(pal.legs, skin).cgColor, sc(pal.legs, skin).cgColor] as CFArray
+                    if let legGrad = CGGradient(colorsSpace: cs, colors: legCols, locations: [0.04, 0.32, 1.0]) {
+                        ctx.drawLinearGradient(legGrad, start: limb.root, end: limb.tip, options: [.drawsAfterEndLocation])
                     }
                 } else {
-                    ctx.setFillColor(sc(legCol, skin).cgColor)
+                    ctx.setFillColor(sc(pal.belly ?? pal.body, skin).cgColor)
+                    ctx.addPath(g.fill)
                     ctx.fillPath()
                 }
             } else {
@@ -8460,6 +8510,16 @@ enum CatRenderer {
                 for region in skin.regions where region.space == armSpace { drawRegion(in: ctx, region, srgb: srgb, map: armMap) }
                 for mark in skin.marks where mark.space == armSpace { drawMark(in: ctx, mark, srgb: srgb, map: armMap) }
             }
+
+            // 3) Seated-consistent paw cuff overlay AFTER arm marks (matches drawIdleFrontLeg cuff order!)
+            if !isDazed && !skin.colorpoint && !limb.isBehindBody,
+               let armSpace = limb.armSpace, skin.partGradients[armSpace.rawValue] == nil,
+               pal.paws != pal.legs {
+                let cuffCols = [sc(pal.paws, 0.0, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
+                if let cuffGrad = CGGradient(colorsSpace: cs, colors: cuffCols, locations: [0.74, 0.85]) {
+                    ctx.drawLinearGradient(cuffGrad, start: limb.root, end: limb.tip, options: [.drawsAfterEndLocation])
+                }
+            }
             ctx.restoreGState()
 
             // Trimmed open contour + 2 cute toe ticks
@@ -8479,13 +8539,13 @@ enum CatRenderer {
             ctx.restoreGState()
         }
 
-        let catLayerAlpha = smoothstep(0.0, 0.22, lift)
+        let catLayerAlpha = smoothstep(0.0, 0.45, lift)
         ctx.saveGState()
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
 
-        // Gentle pendulum rotation anchored right at the lifted scruff pinch point between the ears!
-        let bodyPendulum = max(-0.17, min(0.17, swingH * 0.16)) * smoothstep(0.0, 0.25, lift)
+        // Real pendulum rotation around the pinched nape (CatPhysics.stepDangle)
+        let bodyPendulum = -theta * smoothstep(0.0, 0.25, lift)
         if abs(bodyPendulum) > 0.001 {
             ctx.translateBy(x: scruffPinch.x, y: scruffPinch.y)
             ctx.rotate(by: bodyPendulum)
@@ -8597,15 +8657,17 @@ enum CatRenderer {
         drawDragLimb(backLeftLimb)
         drawDragLimb(backRightLimb)
 
-        // 3. Native 3D Ears tucked cleanly behind the head crown (seamless ear bases just like seated mode!)
-        drawEarsLayer(in: ctx, center: headCenter, physics: physics, skin: skin)
-
-        // 4. Unified Front-Facing Long-Cat Head + Subtle Scruff Pinch + Stretched Torso
+        // 4. Unified Front-Facing Long-Cat Head + Gentle Scruff Pinch + Stretched Torso
+        // Use a static jaw-split map (without 3D pitch elevation) so head fur and body fur meet on an exact seamless seam!
         let headMap: (CGPoint) -> CGPoint = { Self.headPoint($0, skull: false, skin: skin, head: headCenter, physics: physics) }
         let headWhiteMap: (CGPoint) -> CGPoint = { Self.headPoint($0, skull: false, skin: skin, head: headCenter, physics: physics, whiteSurface: true) }
         let skullMap: (CGPoint) -> CGPoint = { Self.headPoint($0, skull: true, skin: skin, head: headCenter, physics: physics) }
+        let jawStaticMap: (CGPoint) -> CGPoint = { pt in
+            CGPoint(x: headCenter.x + pt.x * hs, y: headCenter.y + pt.y * hs)
+        }
 
         if isDazed {
+            drawEarsLayer(in: ctx, center: headCenter, physics: physics, skin: skin)
             // Authentic stretched Monster Hunter Palico hood + indigo tunic + cream lower tummy
             ctx.saveGState()
             ctx.addPath(longCatPath)
@@ -8664,125 +8726,121 @@ enum CatRenderer {
             }
             ctx.restoreGState()
         } else {
-            ctx.saveGState()
-            ctx.setFillColor(sc(pal.body, skin).cgColor)
-            ctx.addPath(longCatPath)
-            ctx.fillPath()
-            ctx.addPath(longCatPath)
-            ctx.clip()
-
-            if let shade = pal.bodyShade, let grad = cachedBodyShadeGradient(body: pal.body, shade: shade, srgb: srgb) {
-                ctx.drawLinearGradient(grad, start: CGPoint(x: headCenter.x, y: headCenter.y - 36),
-                                       end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip),
-                                       options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-            }
-
-            if let bodyGrad = skin.partGradients["body"] {
+            func paintFur(_ clipPath: CGPath) {
                 ctx.saveGState()
-                let bodySide = cachedJawSide(head: false, cheekFullness: skin.shape.cheekFullness)
-                ctx.addPath(polyline(bodySide, closed: true, map: headMap))
-                ctx.clip()
-                drawClampedPartGradient(in: ctx, bodyGrad, start: CGPoint(x: headCenter.x, y: headCenter.y + 20), end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip), srgb: srgb)
-                ctx.restoreGState()
-            }
-
-            if let headBody = pal.headBody, headBody != pal.body {
-                ctx.saveGState()
-                let headSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
-                ctx.addPath(polyline(headSide, closed: true, map: headMap))
-                ctx.clip()
-                ctx.setFillColor(sc(headBody, skin).cgColor)
-                ctx.addPath(longCatPath)
+                ctx.setFillColor(sc(pal.body, skin).cgColor)
+                ctx.addPath(clipPath)
                 ctx.fillPath()
-                ctx.restoreGState()
-            }
-
-            if let headGrad = skin.partGradients["head"] {
-                ctx.saveGState()
-                let headSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
-                ctx.addPath(polyline(headSide, closed: true, map: headMap))
+                ctx.addPath(clipPath)
                 ctx.clip()
-                drawClampedPartGradient(in: ctx, headGrad, start: CGPoint(x: headCenter.x, y: headCenter.y - 48), end: CGPoint(x: headCenter.x, y: headCenter.y + 40), srgb: srgb)
-                ctx.restoreGState()
-            }
 
-            // 2.5D Colorpoint face mask (Siamese / Ragdoll)
-            if let point = pal.points {
-                let mid = pal.pointsMid ?? point
-                let pointGrads = cachedPointsGradients(point: point, mid: mid, srgb: srgb)
-                ctx.saveGState()
-                ctx.translateBy(x: headCenter.x, y: headCenter.y + 3.0)
-                ctx.scaleBy(x: 1.22 * hs, y: 0.88 * hs)
-                if let g = pointGrads.mask {
-                    ctx.drawRadialGradient(g, startCenter: .zero, startRadius: 0, endCenter: .zero, endRadius: 31.0, options: [.drawsBeforeStartLocation])
+                if let shade = pal.bodyShade, let grad = cachedBodyShadeGradient(body: pal.body, shade: shade, srgb: srgb) {
+                    ctx.drawLinearGradient(grad, start: CGPoint(x: headCenter.x, y: headCenter.y - 36),
+                                           end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip),
+                                           options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
                 }
-                ctx.restoreGState()
-            }
 
-            // Curve regions: body regions below jawline first, then skull/head regions above jawline
-            let dragBodySide = cachedJawSide(head: false, cheekFullness: skin.shape.cheekFullness)
-            for region in skin.regions where region.space == .body {
-                ctx.saveGState()
-                ctx.addPath(polyline(dragBodySide, closed: true, map: headMap))
-                ctx.clip()
-                drawRegion(in: ctx, region, srgb: srgb, map: dragBodyMap)
-                ctx.restoreGState()
-            }
-            let dragHeadSide = SkinSpec.jawSide(head: true, cheekFullness: skin.shape.cheekFullness)
-            for region in skin.regions where region.space == .head || region.space == .skull {
-                ctx.saveGState()
-                ctx.addPath(polyline(dragHeadSide, closed: true, map: headMap))
-                ctx.clip()
-                drawRegion(in: ctx, region, srgb: srgb, map: region.space == .skull ? skullMap : headMap)
-                ctx.restoreGState()
-            }
-
-            // Marks: preserve skin mark order with body marks clipped below jawline and head/skull marks clipped above jawline
-            for mark in skin.marks {
-                switch mark.space {
-                case .body:
+                if let bodyGrad = skin.partGradients["body"] {
                     ctx.saveGState()
-                    ctx.addPath(polyline(dragBodySide, closed: true, map: headMap))
+                    let bodySide = cachedJawSide(head: false, cheekFullness: skin.shape.cheekFullness)
+                    ctx.addPath(polyline(bodySide, closed: true, map: jawStaticMap))
                     ctx.clip()
-                    drawMark(in: ctx, mark, srgb: srgb, map: dragBodyMap)
+                    drawClampedPartGradient(in: ctx, bodyGrad, start: CGPoint(x: headCenter.x, y: headCenter.y + 20), end: CGPoint(x: rumpCenterX, y: torsoBottomY + bottomDip), srgb: srgb)
                     ctx.restoreGState()
-                case .skull, .head:
-                    let skipJawClip = shouldSkipJawHeadClip(mark)
-                    let mapFn = mark.space == .skull ? skullMap : (usesStarterMilkSurface(skin, mark) ? headWhiteMap : headMap)
-                    if skipJawClip {
-                        drawMark(in: ctx, mark, srgb: srgb, map: mapFn)
-                    } else {
-                        ctx.saveGState()
-                        ctx.addPath(polyline(dragHeadSide, closed: true, map: headMap))
-                        ctx.clip()
-                        drawMark(in: ctx, mark, srgb: srgb, map: mapFn)
-                        ctx.restoreGState()
-                    }
-                default: break
                 }
-            }
-            ctx.restoreGState()
 
-            if !isBlackRim {
+                if let headBody = pal.headBody, headBody != pal.body {
+                    ctx.saveGState()
+                    let headSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
+                    ctx.addPath(polyline(headSide, closed: true, map: jawStaticMap))
+                    ctx.clip()
+                    ctx.setFillColor(sc(headBody, skin).cgColor)
+                    ctx.addPath(clipPath)
+                    ctx.fillPath()
+                    ctx.restoreGState()
+                }
+
+                if let headGrad = skin.partGradients["head"] {
+                    ctx.saveGState()
+                    let headSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
+                    ctx.addPath(polyline(headSide, closed: true, map: jawStaticMap))
+                    ctx.clip()
+                    drawClampedPartGradient(in: ctx, headGrad, start: CGPoint(x: headCenter.x, y: headCenter.y - 48), end: CGPoint(x: headCenter.x, y: headCenter.y + 40), srgb: srgb)
+                    ctx.restoreGState()
+                }
+
+                // 2.5D Colorpoint face mask (Siamese / Ragdoll)
+                if let point = pal.points {
+                    let mid = pal.pointsMid ?? point
+                    let pointGrads = cachedPointsGradients(point: point, mid: mid, srgb: srgb)
+                    ctx.saveGState()
+                    ctx.translateBy(x: headCenter.x, y: headCenter.y + 3.0)
+                    ctx.scaleBy(x: 1.22 * hs, y: 0.88 * hs)
+                    if let g = pointGrads.mask {
+                        ctx.drawRadialGradient(g, startCenter: .zero, startRadius: 0, endCenter: .zero, endRadius: 31.0, options: [.drawsBeforeStartLocation])
+                    }
+                    ctx.restoreGState()
+                }
+
+                // Curve regions: body regions below jawline first, then skull/head regions above jawline
+                let dragBodySide = cachedJawSide(head: false, cheekFullness: skin.shape.cheekFullness)
+                for region in skin.regions where region.space == .body {
+                    ctx.saveGState()
+                    ctx.addPath(polyline(dragBodySide, closed: true, map: jawStaticMap))
+                    ctx.clip()
+                    drawRegion(in: ctx, region, srgb: srgb, map: dragBodyMap)
+                    ctx.restoreGState()
+                }
+                let dragHeadSide = cachedJawSide(head: true, cheekFullness: skin.shape.cheekFullness)
+                for region in skin.regions where region.space == .head || region.space == .skull {
+                    ctx.saveGState()
+                    ctx.addPath(polyline(dragHeadSide, closed: true, map: jawStaticMap))
+                    ctx.clip()
+                    drawRegion(in: ctx, region, srgb: srgb, map: region.space == .skull ? skullMap : headMap)
+                    ctx.restoreGState()
+                }
+
+                // Marks: preserve skin mark order with body marks clipped below jawline and head/skull marks clipped above jawline
+                for mark in skin.marks {
+                    switch mark.space {
+                    case .body:
+                        ctx.saveGState()
+                        ctx.addPath(polyline(dragBodySide, closed: true, map: jawStaticMap))
+                        ctx.clip()
+                        drawMark(in: ctx, mark, srgb: srgb, map: dragBodyMap)
+                        ctx.restoreGState()
+                    case .skull, .head:
+                        let skipJawClip = shouldSkipJawHeadClip(mark)
+                        let mapFn = mark.space == .skull ? skullMap : (usesStarterMilkSurface(skin, mark) ? headWhiteMap : headMap)
+                        if skipJawClip {
+                            drawMark(in: ctx, mark, srgb: srgb, map: mapFn)
+                        } else {
+                            ctx.saveGState()
+                            ctx.addPath(polyline(dragHeadSide, closed: true, map: jawStaticMap))
+                            ctx.clip()
+                            drawMark(in: ctx, mark, srgb: srgb, map: mapFn)
+                            ctx.restoreGState()
+                        }
+                    default: break
+                    }
+                }
+                ctx.restoreGState()
+            }
+            func strokeRim(_ path: CGPath) {
+                guard !isBlackRim else { return }
                 ctx.saveGState()
                 ctx.setStrokeColor(pal.outline.map { sc($0, skin).cgColor } ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.22).cgColor)
                 ctx.setLineWidth(pal.outline != nil ? 1.5 : 1.05)
-                ctx.addPath(longCatPath)
+                ctx.addPath(path)
                 ctx.strokePath()
                 ctx.restoreGState()
             }
-
-            // Subtle soft chin shadow curve (gentle depth cue without cutting a hard ring through solid coats)
-            ctx.saveGState()
-            ctx.setStrokeColor(isBlackRim
-                ? NSColor(calibratedWhite: 1.0, alpha: 0.16).cgColor
-                : (pal.outline.map { sc($0, 0.45, skin).cgColor } ?? NSColor(calibratedRed: 0.18, green: 0.15, blue: 0.12, alpha: 0.16).cgColor))
-            ctx.setLineWidth(isBlackRim ? 1.05 : 1.0)
-            ctx.move(to: CGPoint(x: headCenter.x - cheekHalfW * 0.56, y: headCenter.y + chinY - 2.5 * hs))
-            ctx.addQuadCurve(to: CGPoint(x: headCenter.x + cheekHalfW * 0.56, y: headCenter.y + chinY - 2.5 * hs),
-                             control: CGPoint(x: headCenter.x, y: headCenter.y + chinY + 3.5 * hs))
-            ctx.strokePath()
-            ctx.restoreGState()
+            // 4a. Back + pinched nape skin + torso, 4b. ears in front of the nape, 4c. head over the ear bases
+            paintFur(longCatPath)
+            strokeRim(longCatPath)
+            drawEarsLayer(in: ctx, center: headCenter, physics: physics, skin: skin)
+            paintFur(headOnlyPath)
+            strokeRim(headLeftRimPath)
         }
 
         // 5. Native KuroCat Face Features (normal authentic almond eyes — no round bug-eyes!)
@@ -8801,8 +8859,27 @@ enum CatRenderer {
             ctx.setAlpha(1.0)
         }
 
-        // 5b. Carry the keyboard and mouse / tablet + middle-gripped stylus with smooth 2D inertia;
-        // at lift=0 (carry=0), the transform equals the exact desk coordinates so there is zero pop.
+        // 5b. Dual mode: default carries keyboard & mouse/tablet cleanly; when pureScruffDrag is enabled, desk props fade out on desk!
+        if CatSettings.shared.pureScruffDrag {
+            let deskAlpha = 1.0 - smoothstep(0.0, 0.25, liftS)
+            if deskAlpha > 0.02 {
+                ctx.saveGState()
+                ctx.setAlpha(deskAlpha)
+                ctx.translateBy(x: scruffPinch.x, y: scruffPinch.y)
+                ctx.rotate(by: -bodyPendulum)
+                ctx.translateBy(x: -scruffPinch.x, y: -scruffPinch.y)
+                if physics.isTabletActive {
+                    drawTablet(in: ctx, physics: physics, theme: keyboardTheme, eyeTheme: eyeTheme)
+                    drawParkedStylus(in: ctx, theme: keyboardTheme, eyeTheme: eyeTheme)
+                } else {
+                    drawMouse(in: ctx, physics: physics, kbSkin: kbSkin)
+                }
+                drawKeyboard(in: ctx, physics: physics, kbSkin: kbSkin,
+                             eyeTheme: eyeTheme, showLegends: showKeyLegends,
+                             flipped: flipped, marquee: keyboardMarquee)
+                ctx.restoreGState()
+            }
+        } else {
         let worldKeyboardGrip = rot(frontRightLimb.tip, around: scruffPinch, angle: bodyPendulum)
         let worldPointerGrip = rot(frontLeftLimb.tip, around: scruffPinch, angle: bodyPendulum)
         let keyboardHandAngle = atan2(frontRightLimb.tip.y - frontRightLimb.root.y,
@@ -8869,11 +8946,13 @@ enum CatRenderer {
                            eyeTheme: eyeTheme, pressed: physics.tabletPenPress.value * (1.0 - carry))
             ctx.restoreGState()
         } else {
-            let mouseGrip = CGPoint(x: CatPhysics.mouseBaseCenter.x + physics.mouseOffset.point.x,
-                                    y: CatPhysics.mouseBaseCenter.y + physics.mouseOffset.point.y - 10.0)
-            carryTransform(from: mouseGrip, to: worldPointerGrip, angle: -0.18 + pointerHandAngle + bodyPendulum) {
+            let mouseGrip = CGPoint(x: CatPhysics.mouseBaseCenter.x + physics.mouseOffset.point.x + 2.0,
+                                    y: CatPhysics.mouseBaseCenter.y + physics.mouseOffset.point.y - 4.0)
+            let mouseTarget = CGPoint(x: worldPointerGrip.x - 2.0, y: worldPointerGrip.y + 2.0)
+            carryTransform(from: mouseGrip, to: mouseTarget, angle: -0.18 + pointerHandAngle + bodyPendulum) {
                 drawMouse(in: ctx, physics: physics, kbSkin: kbSkin)
             }
+        }
         }
 
         // 6. Dangling front arms hanging over the carried props & gripping barrel/keyboard/mouse!
@@ -8889,6 +8968,10 @@ enum CatRenderer {
             let dragNeck = CGPoint(x: headCenter.x + hipLagX * 0.08, y: headCenter.y + 36.0 * hs)
             drawDecorations(in: ctx, seatX: rumpCenterX, seatY: torsoBottomY, head: headCenter, physics: physics, skin: skin,
                             neckOverride: dragNeck, tailTipOverride: tailTip, anchors: [.neck, .face, .headTop])
+        }
+        // 8. Auto-worn 2.5D headphones & floating music notes stay on the cat's head while dragged!
+        if physics.musicIntensity > 0.01 {
+            drawMusicHeadphones(in: ctx, center: headCenter, physics: physics, eyeTheme: eyeTheme, skin: skin)
         }
         if catLayerAlpha < 0.995 {
             ctx.endTransparencyLayer()
