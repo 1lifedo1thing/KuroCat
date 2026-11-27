@@ -1592,21 +1592,50 @@ static void showSettingsWindow() {
     auto tr = [&](const char* zh, const char* eng) -> const char* { return en ? eng : zh; };
 
     GtkWidget* win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_widget_set_name(win, "kuro-settings-win");
     gtk_window_set_title(GTK_WINDOW(win), tr("KuroCat 设置", "KuroCat Settings"));
-    int defW = 500, defH = 620;
+    int defW = 520, defH = 548;
     GdkRectangle wa = { 0, 0, 1280, 800 };
     if (GdkDisplay* dpy = gdk_display_get_default()) {
         GdkMonitor* mon = gdk_display_get_primary_monitor(dpy);
         if (!mon) mon = gdk_display_get_monitor(dpy, 0);
         if (mon) {
             gdk_monitor_get_workarea(mon, &wa);
-            defW = std::min(500, std::max(340, wa.width - 40));
-            defH = std::min(620, std::max(340, wa.height - 72));
+            defW = std::min(520, std::max(360, wa.width - 40));
+            defH = std::min(548, std::max(380, wa.height - 72));
         }
     }
     gtk_window_set_default_size(GTK_WINDOW(win), defW, defH);
     gtk_window_move(GTK_WINDOW(win), wa.x + std::max(0, (wa.width - defW) / 2), wa.y + std::max(12, (wa.height - defH) / 2));
     app.settingsWindow = win;
+
+    // Scoped Pure-White Minimal Operate CSS (matches macOS & Windows 1:1, never affects transparent pet window)
+    static bool cssInstalled = false;
+    if (!cssInstalled) {
+        cssInstalled = true;
+        GtkCssProvider* css = gtk_css_provider_new();
+        const char* kSettingsCss =
+            "#kuro-settings-win { background-color: #ffffff; color: #131316; }\n"
+            "#kuro-settings-win .kuro-title { font-size: 16px; font-weight: 600; color: #131316; }\n"
+            "#kuro-settings-win .kuro-sub { font-size: 11px; color: #6e6e73; }\n"
+            "#kuro-settings-win .kuro-ver { background: #f4f4f6; color: #6e6e73; border-radius: 6px; padding: 2px 8px; font-size: 11px; }\n"
+            "#kuro-settings-win stackswitcher { background: #f4f4f6; border-radius: 9px; padding: 3px; }\n"
+            "#kuro-settings-win stackswitcher button { background: transparent; border: none; box-shadow: none; color: #6e6e73; border-radius: 6px; padding: 5px 12px; font-weight: 500; }\n"
+            "#kuro-settings-win stackswitcher button:checked { background: #ffffff; color: #131316; border: 1px solid #e6e6eb; box-shadow: 0 1px 2px rgba(0,0,0,0.06); font-weight: 600; }\n"
+            "#kuro-settings-win .kuro-card { background: #ffffff; border: 1px solid #e6e6eb; border-radius: 10px; padding: 14px; }\n"
+            "#kuro-settings-win button { background: #ffffff; border: 1px solid #e6e6eb; border-radius: 7px; color: #131316; padding: 4px 10px; box-shadow: none; }\n"
+            "#kuro-settings-win button:hover { background: #f4f4f6; }\n"
+            "#kuro-settings-win button.kuro-primary { background: #18181b; border-color: #18181b; color: #ffffff; font-weight: 500; }\n"
+            "#kuro-settings-win button.kuro-primary:hover { background: #323237; }\n"
+            "#kuro-settings-win button.kuro-danger { background: #ffffff; border-color: rgba(220,38,38,0.35); color: #dc2626; }\n"
+            "#kuro-settings-win button.kuro-danger:hover { background: #fef2f2; }\n"
+            "#kuro-settings-win separator { background-color: #f0f0f3; min-height: 1px; }\n";
+        gtk_css_provider_load_from_data(css, kSettingsCss, -1, nullptr);
+        if (GdkScreen* scr = gdk_screen_get_default()) {
+            gtk_style_context_add_provider_for_screen(scr, GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        }
+        g_object_unref(css);
+    }
 
     g_signal_connect(win, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) {
         g_app->settingsWindow = nullptr;
@@ -1618,22 +1647,53 @@ static void showSettingsWindow() {
         g_app->setAutostartChk = g_app->setHighFpsChk = g_app->setObsCombo = g_app->setObsHideChk = g_app->setLangCombo = nullptr;
     }), nullptr);
 
+    GtkWidget* outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_set_border_width(GTK_CONTAINER(outer), 18);
+    gtk_container_add(GTK_CONTAINER(win), outer);
+
+    // Minimal Typographic Header (no logo, no emoji)
+    GtkWidget* headerRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* headerLeft = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget* titleLbl = gtk_label_new(tr("KuroCat 设置", "KuroCat Settings"));
+    gtk_widget_set_halign(titleLbl, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(titleLbl), "kuro-title");
+    std::string activeSkinName = activeSkin(app).name;
+    std::string subStr = en ? ("Active: " + activeSkinName) : ("当前皮肤：" + activeSkinName);
+    GtkWidget* subLbl = gtk_label_new(subStr.c_str());
+    gtk_widget_set_halign(subLbl, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(subLbl), "kuro-sub");
+    gtk_box_pack_start(GTK_BOX(headerLeft), titleLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(headerLeft), subLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(headerRow), headerLeft, TRUE, TRUE, 0);
+
+    std::string verStr = std::string("v") + APP_VERSION;
+    GtkWidget* verLbl = gtk_label_new(verStr.c_str());
+    gtk_widget_set_valign(verLbl, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(verLbl), "kuro-ver");
+    gtk_box_pack_end(GTK_BOX(headerRow), verLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outer), headerRow, FALSE, FALSE, 0);
+
+    // 3-Tab Stack Switcher
+    GtkWidget* stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_NONE);
+    GtkWidget* switcher = gtk_stack_switcher_new();
+    gtk_stack_switcher_set_stack(GTK_STACK_SWITCHER(switcher), GTK_STACK(stack));
+    gtk_box_set_homogeneous(GTK_BOX(switcher), TRUE);
+    gtk_box_pack_start(GTK_BOX(outer), switcher, FALSE, FALSE, 0);
+
     GtkWidget* scroller = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_container_add(GTK_CONTAINER(win), scroller);
+    gtk_container_add(GTK_CONTAINER(scroller), stack);
+    gtk_box_pack_start(GTK_BOX(outer), scroller, TRUE, TRUE, 0);
 
-    GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_container_set_border_width(GTK_CONTAINER(root), 14);
-    gtk_container_add(GTK_CONTAINER(scroller), root);
-
-    auto makeSection = [&](const char* title) -> GtkWidget* {
-        GtkWidget* frame = gtk_frame_new(title);
+    auto makeTabGrid = [&](const char* name, const char* title) -> GtkWidget* {
+        GtkWidget* wrap = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         GtkWidget* grid = gtk_grid_new();
-        gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
-        gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+        gtk_style_context_add_class(gtk_widget_get_style_context(grid), "kuro-card");
+        gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
         gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
-        gtk_container_add(GTK_CONTAINER(frame), grid);
-        gtk_box_pack_start(GTK_BOX(root), frame, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(wrap), grid, FALSE, FALSE, 0);
+        gtk_stack_add_titled(GTK_STACK(stack), wrap, name, title);
         return grid;
     };
     auto leftLabel = [](const char* txt) -> GtkWidget* {
@@ -1642,9 +1702,9 @@ static void showSettingsWindow() {
         return l;
     };
 
-    // Section 1: Appearance & Orientation
+    // Tab 1: Appearance
     {
-        GtkWidget* g = makeSection(tr("外观与方向", "Appearance & Orientation"));
+        GtkWidget* g = makeTabGrid("appearance", tr("外观", "Appearance"));
         int r = 0;
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("猫咪皮肤", "Cat Skin")), 0, r, 1, 1);
@@ -1673,20 +1733,13 @@ static void showSettingsWindow() {
             refreshSettingsWindow(*g_app);
         }), nullptr);
         gtk_grid_attach(GTK_GRID(g), app.setCoatCombo, 1, r, 1, 1);
-        GtkWidget* coatActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-        GtkWidget* dressBtn = gtk_button_new_with_label(tr("换装间…", "Wardrobe…"));
-        g_signal_connect(dressBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { showDressingRoom(); }), nullptr);
+        GtkWidget* coatActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         app.setDeleteSkinBtn = gtk_button_new_with_label(tr("删除", "Delete"));
+        gtk_style_context_add_class(gtk_widget_get_style_context(app.setDeleteSkinBtn), "kuro-danger");
         g_signal_connect(app.setDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
             if (!g_app->settings.customSkin.empty()) confirmDeleteSkin(g_app->settings.customSkin);
         }), nullptr);
-        app.setBatchDeleteSkinBtn = gtk_button_new_with_label(tr("批量删除…", "Batch…"));
-        g_signal_connect(app.setBatchDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
-            confirmBatchDeleteSkins();
-        }), nullptr);
-        gtk_box_pack_start(GTK_BOX(coatActions), dressBtn, TRUE, TRUE, 0);
         gtk_box_pack_start(GTK_BOX(coatActions), app.setDeleteSkinBtn, FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(coatActions), app.setBatchDeleteSkinBtn, FALSE, FALSE, 0);
         gtk_grid_attach(GTK_GRID(g), coatActions, 2, r++, 1, 1);
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("皮肤目录", "Skins Dir")), 0, r, 1, 1);
@@ -1869,9 +1922,9 @@ static void showSettingsWindow() {
         gtk_grid_attach(GTK_GRID(g), optRow, 0, r++, 3, 1);
     }
 
-    // Section 2: Interaction & Effects
+    // Tab 2: Interaction
     {
-        GtkWidget* g = makeSection(tr("互动与特效", "Interaction & Effects"));
+        GtkWidget* g = makeTabGrid("interaction", tr("互动", "Interaction"));
         int r = 0;
 
         app.setDragAnimChk = gtk_check_button_new_with_label(tr("拎起拖拽动画", "Scruff-Drag Lift Animation"));
@@ -1974,9 +2027,9 @@ static void showSettingsWindow() {
         gtk_grid_attach(GTK_GRID(g), app.setTabletCombo, 1, r++, 2, 1);
     }
 
-    // Section 3: Window & System
+    // Tab 3: System
     {
-        GtkWidget* g = makeSection(tr("窗口与系统", "Window & System"));
+        GtkWidget* g = makeTabGrid("system", tr("系统", "System"));
         int r = 0;
 
         app.setTopmostChk = gtk_check_button_new_with_label(tr("窗口置顶显示", "Always On Top"));
@@ -2090,6 +2143,23 @@ static void showSettingsWindow() {
         gtk_box_pack_start(GTK_BOX(dirsBox), kDirBtn, TRUE, TRUE, 0);
         gtk_grid_attach(GTK_GRID(g), dirsBox, 2, r++, 1, 1);
     }
+
+    // Clean Bottom Action Bar (matches macOS & Windows 1:1, no emoji)
+    GtkWidget* sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(outer), sep, FALSE, FALSE, 2);
+    GtkWidget* footerRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    app.setBatchDeleteSkinBtn = gtk_button_new_with_label(tr("批量删除皮肤", "Batch Delete"));
+    gtk_style_context_add_class(gtk_widget_get_style_context(app.setBatchDeleteSkinBtn), "kuro-danger");
+    g_signal_connect(app.setBatchDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+        confirmBatchDeleteSkins();
+    }), nullptr);
+    gtk_box_pack_start(GTK_BOX(footerRow), app.setBatchDeleteSkinBtn, FALSE, FALSE, 0);
+
+    GtkWidget* importBtn = gtk_button_new_with_label(tr("导入皮肤…", "Import Skin…"));
+    gtk_style_context_add_class(gtk_widget_get_style_context(importBtn), "kuro-primary");
+    g_signal_connect(importBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { showDressingRoom(); }), nullptr);
+    gtk_box_pack_end(GTK_BOX(footerRow), importBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outer), footerRow, FALSE, FALSE, 0);
 
     refreshSettingsWindow(app);
     gtk_widget_show_all(win);

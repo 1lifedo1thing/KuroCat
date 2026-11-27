@@ -241,9 +241,14 @@ struct AppState {
     HWND settingsWnd = nullptr;     // unified native Settings window (nullptr when closed)
     HFONT settingsFont = nullptr;
     HFONT settingsBoldFont = nullptr;
+    HFONT settingsTitleFont = nullptr;
+    HFONT settingsSubFont = nullptr;
     HBRUSH settingsBgBrush = nullptr;
     bool settingsDark = false;
     bool settingsUpdating = false;
+    int settingsTab = 0;            // 0 = Appearance, 1 = Interaction, 2 = System
+    float settingsScale = 1.0f;
+    std::vector<HWND> settingsTabCtrls[3];
 
     bool isVisible = true;
     bool hiddenByFullscreen = false;
@@ -2228,7 +2233,11 @@ enum CtrlId : int {
     ID_SKINS_DIR_PATH,
     ID_BTN_CHOOSE_SKINS_DIR,
     ID_BTN_OPEN_SKINS_DIR,
-    ID_BTN_RESET_SKINS_DIR
+    ID_BTN_RESET_SKINS_DIR,
+    ID_TAB_0,
+    ID_TAB_1,
+    ID_TAB_2,
+    ID_HEADER_SUB
 };
 
 bool isWindowsDarkMode() {
@@ -2284,13 +2293,33 @@ void rebuildCombosAndSync(AppState& app) {
         }
         SendMessageW(coatCb, CB_SETCURSEL, (WPARAM)sel, 0);
         bool hasCustom = !app.settings.customSkin.empty() && app.skins.find(app.settings.customSkin) != nullptr;
-        if (HWND hRen = GetDlgItem(hwnd, ID_BTN_RENAME_SKIN)) EnableWindow(hRen, hasCustom ? TRUE : FALSE);
+        if (HWND hRen = GetDlgItem(hwnd, ID_BTN_RENAME_SKIN)) {
+            EnableWindow(hRen, hasCustom ? TRUE : FALSE);
+            InvalidateRect(hRen, nullptr, TRUE);
+        }
         if (HWND hDel = GetDlgItem(hwnd, ID_BTN_DEL_SKIN)) {
             EnableWindow(hDel, hasCustom ? TRUE : FALSE);
             InvalidateRect(hDel, nullptr, TRUE);
         }
         if (HWND hBatch = GetDlgItem(hwnd, ID_BTN_BATCH_DEL_SKIN)) {
-            EnableWindow(hBatch, !app.skins.skins.empty() ? TRUE : FALSE);
+            size_t cnt = app.skins.skins.size();
+            std::wstring bt = cnt > 0
+                ? (en ? (L"Batch Delete (" + std::to_wstring(cnt) + L")")
+                      : (L"\u6279\u91CF\u5220\u9664\u76AE\u80A4 (" + std::to_wstring(cnt) + L")"))
+                : std::wstring(tr(L"\u6279\u91CF\u5220\u9664\u76AE\u80A4", L"Batch Delete"));
+            SetWindowTextW(hBatch, bt.c_str());
+            EnableWindow(hBatch, cnt > 0 ? TRUE : FALSE);
+            InvalidateRect(hBatch, nullptr, TRUE);
+        }
+        if (HWND hSub = GetDlgItem(hwnd, ID_HEADER_SUB)) {
+            std::wstring activeName = utf8ToWide(activeSkin(app).name);
+            size_t cnt = app.skins.skins.size();
+            std::wstring sub = cnt > 0
+                ? (en ? (L"Active: " + activeName + L" \u00B7 " + std::to_wstring(cnt) + L" imported")
+                      : (L"\u5F53\u524D\u76AE\u80A4\uFF1A" + activeName + L" \u00B7 \u5DF2\u5BFC\u5165 " + std::to_wstring(cnt) + L" \u6B3E"))
+                : (en ? (L"Active: " + activeName)
+                      : (L"\u5F53\u524D\u76AE\u80A4\uFF1A" + activeName));
+            SetWindowTextW(hSub, sub.c_str());
         }
     }
 
@@ -2381,6 +2410,7 @@ void rebuildCombosAndSync(AppState& app) {
     }
     if (HWND hResetDir = GetDlgItem(hwnd, ID_BTN_RESET_SKINS_DIR)) {
         EnableWindow(hResetDir, SkinLibrary::isUsingCustomDir() ? TRUE : FALSE);
+        InvalidateRect(hResetDir, nullptr, TRUE);
     }
 
     app.settingsUpdating = false;
@@ -2481,6 +2511,35 @@ void applySkinsDirectory(AppState& app, const std::wstring& dirW) {
     refreshSettingsWindow(app);
 }
 
+void switchSettingsTab(AppState& app, int tab) {
+    app.settingsTab = std::clamp(tab, 0, 2);
+    for (int t = 0; t < 3; ++t) {
+        int cmd = (t == app.settingsTab) ? SW_SHOW : SW_HIDE;
+        for (HWND c : app.settingsTabCtrls[t]) {
+            if (c && IsWindow(c)) ShowWindow(c, cmd);
+        }
+    }
+    if (app.settingsWnd && IsWindow(app.settingsWnd)) {
+        for (int id : { settings_ui::ID_TAB_0, settings_ui::ID_TAB_1, settings_ui::ID_TAB_2 }) {
+            if (HWND tb = GetDlgItem(app.settingsWnd, id)) InvalidateRect(tb, nullptr, TRUE);
+        }
+        InvalidateRect(app.settingsWnd, nullptr, TRUE);
+    }
+}
+
+static void addGdipRoundedRect(Gdiplus::GraphicsPath& path, float x, float y, float w, float h, float r) {
+    float d = std::min(r * 2.0f, std::min(w, h));
+    if (d <= 0.5f) {
+        path.AddRectangle(Gdiplus::RectF(x, y, w, h));
+        return;
+    }
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
 LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     AppState* app = g_app;
     switch (msg) {
@@ -2492,12 +2551,82 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return TRUE;
             }
             break;
+        case WM_PAINT: {
+            PAINTSTRUCT ps = {};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (app) {
+                float k = app->settingsScale > 0.1f ? app->settingsScale : 1.0f;
+                auto px = [&](float v) { return v * k; };
+                bool dk = app->settingsDark;
+                RECT crc = {};
+                GetClientRect(hwnd, &crc);
+                float cw = (float)(crc.right - crc.left);
+                float ch = (float)(crc.bottom - crc.top);
+
+                Gdiplus::Graphics g(hdc);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+                // 1. Subtle version pill (top-right, no logo)
+                {
+                    float pw = px(54), ph = px(20);
+                    float rx = cw - px(20) - pw, ry = px(14);
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, rx, ry, pw, ph, px(6));
+                    Gdiplus::SolidBrush br(dk ? Gdiplus::Color(255, 42, 42, 46) : Gdiplus::Color(255, 244, 244, 246));
+                    g.FillPath(&br, &p);
+                    RECT trc = { (LONG)rx, (LONG)ry, (LONG)(rx + pw), (LONG)(ry + ph) };
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, dk ? RGB(152, 152, 159) : RGB(110, 110, 115));
+                    HGDIOBJ oldF = app->settingsSubFont ? SelectObject(hdc, app->settingsSubFont) : nullptr;
+                    std::wstring verTxt = std::wstring(L"v") + APP_VERSION;
+                    DrawTextW(hdc, verTxt.c_str(), -1, &trc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    if (oldF) SelectObject(hdc, oldF);
+                }
+
+                // 2. Segmented 3-Tab track
+                {
+                    float tx = px(20), ty = px(62), tw = cw - px(40), th = px(32);
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, tx, ty, tw, th, px(9));
+                    Gdiplus::SolidBrush br(dk ? Gdiplus::Color(255, 42, 42, 46) : Gdiplus::Color(255, 244, 244, 246));
+                    g.FillPath(&br, &p);
+                }
+
+                // 3. Clean white content card with hairline border
+                {
+                    float cx = px(20), cy = px(106), cardW = cw - px(40), cardH = ch - px(106) - px(58);
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, cx + 0.5f, cy + 0.5f, cardW - 1.0f, cardH - 1.0f, px(10));
+                    Gdiplus::SolidBrush fill(dk ? Gdiplus::Color(255, 32, 32, 35) : Gdiplus::Color(255, 255, 255, 255));
+                    Gdiplus::Pen border(dk ? Gdiplus::Color(255, 54, 54, 60) : Gdiplus::Color(255, 230, 230, 235), 1.0f);
+                    g.FillPath(&fill, &p);
+                    g.DrawPath(&border, &p);
+                }
+
+                // 4. Footer hairline divider
+                {
+                    float fy = ch - px(50);
+                    Gdiplus::Pen divPen(dk ? Gdiplus::Color(255, 45, 45, 50) : Gdiplus::Color(255, 240, 240, 243), 1.0f);
+                    g.DrawLine(&divPen, px(20), fy, cw - px(20), fy);
+                }
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
             if (app && app->settingsBgBrush) {
                 HDC hdc = (HDC)wParam;
+                HWND ctl = (HWND)lParam;
+                int cid = ctl ? GetDlgCtrlID(ctl) : 0;
+                bool isMuted = (cid == settings_ui::ID_HEADER_SUB || cid == settings_ui::ID_SKINS_DIR_PATH
+                             || cid == settings_ui::ID_SCALE_VAL || cid == settings_ui::ID_ROT_VAL);
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, app->settingsDark ? RGB(236, 238, 242) : RGB(28, 30, 34));
+                if (isMuted) {
+                    SetTextColor(hdc, app->settingsDark ? RGB(152, 152, 159) : RGB(110, 110, 115));
+                } else {
+                    SetTextColor(hdc, app->settingsDark ? RGB(245, 245, 247) : RGB(19, 19, 22));
+                }
                 return (LRESULT)app->settingsBgBrush;
             }
             break;
@@ -2542,26 +2671,101 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         case WM_DRAWITEM: {
             auto* dis = (DRAWITEMSTRUCT*)lParam;
-            if (dis && dis->CtlID == settings_ui::ID_BTN_DEL_SKIN) {
+            if (dis && app) {
+                using namespace settings_ui;
+                int cid = (int)dis->CtlID;
+                bool dk = app->settingsDark;
                 bool disabled = (dis->itemState & ODS_DISABLED) != 0;
                 bool pressed = (dis->itemState & ODS_SELECTED) != 0;
-                COLORREF bgCol = disabled ? RGB(224, 224, 224) : (pressed ? RGB(175, 35, 35) : RGB(217, 56, 56));
-                COLORREF txtCol = disabled ? RGB(145, 145, 145) : RGB(255, 255, 255);
-                HBRUSH br = CreateSolidBrush(bgCol);
-                FillRect(dis->hDC, &dis->rcItem, br);
-                DeleteObject(br);
-                HPEN pen = CreatePen(PS_SOLID, 1, disabled ? RGB(195, 195, 195) : RGB(165, 30, 30));
-                HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
-                HGDIOBJ oldBr = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-                Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
-                SelectObject(dis->hDC, oldPen);
-                SelectObject(dis->hDC, oldBr);
-                DeleteObject(pen);
+                float k = app->settingsScale > 0.1f ? app->settingsScale : 1.0f;
+
+                RECT r = dis->rcItem;
+                float w = (float)(r.right - r.left);
+                float h = (float)(r.bottom - r.top);
+
+                // Clear item background first
+                bool isTab = (cid == ID_TAB_0 || cid == ID_TAB_1 || cid == ID_TAB_2);
+                COLORREF outerBg = isTab
+                    ? (dk ? RGB(42, 42, 46) : RGB(244, 244, 246))
+                    : (dk ? RGB(24, 24, 26) : RGB(255, 255, 255));
+                HBRUSH clearBr = CreateSolidBrush(outerBg);
+                FillRect(dis->hDC, &r, clearBr);
+                DeleteObject(clearBr);
+
+                Gdiplus::Graphics g(dis->hDC);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+                COLORREF txtCol = dk ? RGB(245, 245, 247) : RGB(19, 19, 22);
+                bool useBold = false;
+
+                if (isTab) {
+                    int tabIdx = (cid == ID_TAB_0) ? 0 : ((cid == ID_TAB_1) ? 1 : 2);
+                    bool active = (app->settingsTab == tabIdx);
+                    if (active) {
+                        Gdiplus::GraphicsPath p;
+                        addGdipRoundedRect(p, (float)r.left + 0.5f, (float)r.top + 0.5f, w - 1.0f, h - 1.0f, 6.5f * k);
+                        Gdiplus::SolidBrush fill(dk ? Gdiplus::Color(255, 60, 60, 66) : Gdiplus::Color(255, 255, 255, 255));
+                        Gdiplus::Pen border(dk ? Gdiplus::Color(255, 72, 72, 80) : Gdiplus::Color(220, 226, 226, 232), 1.0f);
+                        g.FillPath(&fill, &p);
+                        g.DrawPath(&border, &p);
+                        txtCol = dk ? RGB(245, 245, 247) : RGB(19, 19, 22);
+                        useBold = true;
+                    } else {
+                        txtCol = dk ? RGB(152, 152, 159) : RGB(110, 110, 115);
+                    }
+                } else {
+                    bool isPrimary = (cid == ID_BTN_DRESSING);
+                    bool isDanger = (cid == ID_BTN_DEL_SKIN || cid == ID_BTN_BATCH_DEL_SKIN);
+                    Gdiplus::Color fillCol;
+                    Gdiplus::Color strokeCol(0, 0, 0, 0);
+                    bool hasStroke = true;
+
+                    if (disabled) {
+                        fillCol = dk ? Gdiplus::Color(255, 36, 36, 40) : Gdiplus::Color(255, 246, 246, 248);
+                        strokeCol = dk ? Gdiplus::Color(255, 50, 50, 56) : Gdiplus::Color(255, 232, 232, 237);
+                        txtCol = dk ? RGB(100, 100, 108) : RGB(170, 170, 178);
+                    } else if (isPrimary) {
+                        hasStroke = false;
+                        if (dk) {
+                            fillCol = pressed ? Gdiplus::Color(255, 210, 210, 216) : Gdiplus::Color(255, 240, 240, 243);
+                            txtCol = RGB(19, 19, 22);
+                        } else {
+                            fillCol = pressed ? Gdiplus::Color(255, 50, 50, 55) : Gdiplus::Color(255, 24, 24, 27);
+                            txtCol = RGB(255, 255, 255);
+                        }
+                        useBold = true;
+                    } else if (isDanger) {
+                        fillCol = pressed
+                            ? (dk ? Gdiplus::Color(255, 76, 32, 34) : Gdiplus::Color(255, 254, 226, 226))
+                            : (dk ? Gdiplus::Color(255, 32, 32, 35) : Gdiplus::Color(255, 255, 255, 255));
+                        strokeCol = dk ? Gdiplus::Color(110, 239, 68, 68) : Gdiplus::Color(95, 220, 38, 38);
+                        txtCol = dk ? RGB(239, 68, 68) : RGB(220, 38, 38);
+                    } else {
+                        fillCol = pressed
+                            ? (dk ? Gdiplus::Color(255, 54, 54, 60) : Gdiplus::Color(255, 234, 234, 239))
+                            : (dk ? Gdiplus::Color(255, 32, 32, 35) : Gdiplus::Color(255, 255, 255, 255));
+                        strokeCol = dk ? Gdiplus::Color(255, 58, 58, 66) : Gdiplus::Color(255, 228, 228, 234);
+                        txtCol = dk ? RGB(245, 245, 247) : RGB(19, 19, 22);
+                    }
+
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, (float)r.left + 0.5f, (float)r.top + 0.5f, w - 1.0f, h - 1.0f, 7.0f * k);
+                    Gdiplus::SolidBrush fill(fillCol);
+                    g.FillPath(&fill, &p);
+                    if (hasStroke) {
+                        Gdiplus::Pen border(strokeCol, 1.0f);
+                        g.DrawPath(&border, &p);
+                    }
+                }
+
                 SetBkMode(dis->hDC, TRANSPARENT);
                 SetTextColor(dis->hDC, txtCol);
-                wchar_t txt[64] = {};
-                GetWindowTextW(dis->hwndItem, txt, 63);
-                DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                HFONT f = useBold ? app->settingsBoldFont : app->settingsFont;
+                HGDIOBJ oldF = f ? SelectObject(dis->hDC, f) : nullptr;
+                wchar_t txt[128] = {};
+                GetWindowTextW(dis->hwndItem, txt, 127);
+                DrawTextW(dis->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                if (oldF) SelectObject(dis->hDC, oldF);
                 return TRUE;
             }
             break;
@@ -2633,6 +2837,9 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (code == BN_CLICKED) {
                 auto isChk = [&](int cid) { return SendMessageW(GetDlgItem(hwnd, cid), BM_GETCHECK, 0, 0) == BST_CHECKED; };
                 switch (id) {
+                    case ID_TAB_0: switchSettingsTab(*app, 0); break;
+                    case ID_TAB_1: switchSettingsTab(*app, 1); break;
+                    case ID_TAB_2: switchSettingsTab(*app, 2); break;
                     case ID_BTN_DRESSING: showDressingRoom(*app); break;
                     case ID_BTN_RENAME_SKIN:
                         if (!app->settings.customSkin.empty()) promptRenameSkin(*app, app->settings.customSkin);
@@ -2779,8 +2986,11 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_DESTROY:
             if (app && app->settingsWnd == hwnd) {
                 app->settingsWnd = nullptr;
+                for (int t = 0; t < 3; ++t) app->settingsTabCtrls[t].clear();
                 if (app->settingsFont) { DeleteObject(app->settingsFont); app->settingsFont = nullptr; }
                 if (app->settingsBoldFont) { DeleteObject(app->settingsBoldFont); app->settingsBoldFont = nullptr; }
+                if (app->settingsTitleFont) { DeleteObject(app->settingsTitleFont); app->settingsTitleFont = nullptr; }
+                if (app->settingsSubFont) { DeleteObject(app->settingsSubFont); app->settingsSubFont = nullptr; }
                 if (app->settingsBgBrush) { DeleteObject(app->settingsBgBrush); app->settingsBgBrush = nullptr; }
             }
             return 0;
@@ -2812,24 +3022,29 @@ void showSettingsWindow(AppState& app) {
     float dpiScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
     ReleaseDC(nullptr, screen);
 
-    const int W = 540, H = 740;
+    const int W = 520, H = 548;
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     RECT frameRc = { 0, 0, 0, 0 };
     AdjustWindowRectEx(&frameRc, style, FALSE, 0);
     int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
     RECT work = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    int maxClientW = std::max(320, (int)(work.right - work.left) - frameW - 24);
-    int maxClientH = std::max(360, (int)(work.bottom - work.top) - frameH - 24);
+    int maxClientW = std::max(360, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(380, (int)(work.bottom - work.top) - frameH - 24);
     float k = std::min({ dpiScale, (float)maxClientW / (float)W, (float)maxClientH / (float)H });
     if (k < 0.65f) k = 0.65f;
+    app.settingsScale = k;
     auto px = [&](int v) { return (int)std::lround(v * k); };
 
     app.settingsDark = settings_ui::isWindowsDarkMode();
-    app.settingsBgBrush = CreateSolidBrush(app.settingsDark ? RGB(32, 32, 36) : RGB(246, 246, 248));
+    app.settingsBgBrush = CreateSolidBrush(app.settingsDark ? RGB(24, 24, 26) : RGB(255, 255, 255));
     app.settingsFont = CreateFontW(-px(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     app.settingsBoldFont = CreateFontW(-px(13), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    app.settingsTitleFont = CreateFontW(-px(17), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    app.settingsSubFont = CreateFontW(-px(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
     bool en = app.settings.isEnglish;
@@ -2846,106 +3061,160 @@ void showSettingsWindow(AppState& app) {
         winW, winH, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.settingsWnd = win;
+    for (int t = 0; t < 3; ++t) app.settingsTabCtrls[t].clear();
     settings_ui::applyDwmDarkTitleBar(win, app.settingsDark);
 
-    auto addCtrl = [&](const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, bool bold = false) -> HWND {
+    auto addCtrl = [&](const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, HFONT font = nullptr) -> HWND {
         HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | st,
             px(x), px(y), px(w), px(h), win, (HMENU)(INT_PTR)id, inst, nullptr);
-        if (c) SendMessageW(c, WM_SETFONT, (WPARAM)(bold ? app.settingsBoldFont : app.settingsFont), TRUE);
+        if (c) SendMessageW(c, WM_SETFONT, (WPARAM)(font ? font : app.settingsFont), TRUE);
+        return c;
+    };
+    auto addTabCtrl = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, HFONT font = nullptr) -> HWND {
+        HWND c = addCtrl(cls, txt, st, x, y, w, h, id, font);
+        if (c && tab >= 0 && tab < 3) app.settingsTabCtrls[tab].push_back(c);
         return c;
     };
 
     using namespace settings_ui;
-    // Section 1: Appearance & Orientation
-    addCtrl(L"BUTTON", tr(L"\u5916\u89C2\u4E0E\u65B9\u5411", L"Appearance & Orientation"), BS_GROUPBOX, 14, 10, 512, 264, 0, true);
+    // Minimal Typographic Header (no logo, no bulky banner)
+    addCtrl(L"STATIC", tr(L"KuroCat \u8BBE\u7F6E", L"KuroCat Settings"), SS_LEFT, 20, 12, 260, 22, 0, app.settingsTitleFont);
+    addCtrl(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX, 20, 36, 410, 16, ID_HEADER_SUB, app.settingsSubFont);
 
-    addCtrl(L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin"), SS_LEFT, 28, 38, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 34, 148, 220, ID_COAT_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6362\u88C5\u95F4", L"Wardrobe"), BS_PUSHBUTTON | WS_TABSTOP, 262, 34, 60, 24, ID_BTN_DRESSING);
-    addCtrl(L"BUTTON", tr(L"\u6539\u540D", L"Name"), BS_PUSHBUTTON | WS_TABSTOP, 326, 34, 48, 24, ID_BTN_RENAME_SKIN);
-    addCtrl(L"BUTTON", tr(L"\U0001F5D1\u5220", L"Del"), BS_OWNERDRAW | WS_TABSTOP, 378, 34, 52, 24, ID_BTN_DEL_SKIN, true);
-    addCtrl(L"BUTTON", tr(L"\u6279\u91CF\u5220\u9664\u2026", L"Batch Del..."), BS_PUSHBUTTON | WS_TABSTOP, 434, 34, 78, 24, ID_BTN_BATCH_DEL_SKIN);
+    // 3-Tab Minimal Segmented Bar (no emoji)
+    addCtrl(L"BUTTON", tr(L"\u5916\u89C2", L"Appearance"), BS_OWNERDRAW | WS_TABSTOP, 23, 65, 158, 26, ID_TAB_0);
+    addCtrl(L"BUTTON", tr(L"\u4E92\u52A8", L"Interaction"), BS_OWNERDRAW | WS_TABSTOP, 181, 65, 158, 26, ID_TAB_1);
+    addCtrl(L"BUTTON", tr(L"\u7CFB\u7EDF", L"System"), BS_OWNERDRAW | WS_TABSTOP, 339, 65, 158, 26, ID_TAB_2);
 
-    addCtrl(L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), SS_LEFT, 28, 70, 76, 20, 0);
-    addCtrl(L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX, 110, 70, 178, 20, ID_SKINS_DIR_PATH);
-    addCtrl(L"BUTTON", tr(L"\u9009\u62E9\u6587\u4EF6\u5939\u2026", L"Choose..."), BS_PUSHBUTTON | WS_TABSTOP, 292, 66, 100, 24, ID_BTN_CHOOSE_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u6253\u5F00", L"Open"), BS_PUSHBUTTON | WS_TABSTOP, 396, 66, 50, 24, ID_BTN_OPEN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u9ED8\u8BA4", L"Reset"), BS_PUSHBUTTON | WS_TABSTOP, 450, 66, 62, 24, ID_BTN_RESET_SKINS_DIR);
+    // --- Tab 0: Appearance ---
+    {
+        const int xL = 36, xC = 120;
+        int y = 122;
+        const int dy = 42;
 
-    addCtrl(L"STATIC", tr(L"\u77B3\u8272\u5207\u6362", L"Eye Color"), SS_LEFT, 28, 102, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 98, 290, 220, ID_EYE_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6846\u9009\u8C03\u6574", L"Edit Box"), BS_PUSHBUTTON | WS_TABSTOP, 410, 98, 102, 24, ID_BTN_EDIT_MODE);
+        addTabCtrl(0, L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, xC, y, 246, 220, ID_COAT_COMBO);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6539\u540D", L"Rename"), BS_OWNERDRAW | WS_TABSTOP, 372, y, 52, 24, ID_BTN_RENAME_SKIN);
+        addTabCtrl(0, L"BUTTON", tr(L"\u5220\u9664", L"Delete"), BS_OWNERDRAW | WS_TABSTOP, 430, y, 54, 24, ID_BTN_DEL_SKIN);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u952E\u76D8\u914D\u8272", L"Keyboard"), SS_LEFT, 28, 134, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 130, 290, 220, ID_KB_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u5BFC\u5165\u952E\u76D8\u2026", L"Import..."), BS_PUSHBUTTON | WS_TABSTOP, 410, 130, 102, 24, ID_BTN_IMPORT_KB);
+        addTabCtrl(0, L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX, xC, y + 4, 162, 18, ID_SKINS_DIR_PATH, app.settingsSubFont);
+        addTabCtrl(0, L"BUTTON", tr(L"\u66F4\u6539", L"Choose"), BS_OWNERDRAW | WS_TABSTOP, 288, y, 60, 24, ID_BTN_CHOOSE_SKINS_DIR);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6253\u5F00", L"Open"), BS_OWNERDRAW | WS_TABSTOP, 354, y, 58, 24, ID_BTN_OPEN_SKINS_DIR);
+        addTabCtrl(0, L"BUTTON", tr(L"\u9ED8\u8BA4", L"Reset"), BS_OWNERDRAW | WS_TABSTOP, 418, y, 66, 24, ID_BTN_RESET_SKINS_DIR);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u7F29\u653E\u5927\u5C0F", L"Pet Scale"), SS_LEFT, 28, 168, 76, 20, 0);
-    HWND scaleSb = addCtrl(L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, 110, 168, 290, 18, ID_SCALE_SCROLL);
-    SetScrollRange(scaleSb, SB_CTL, 45, 250, FALSE);
-    addCtrl(L"STATIC", L"100%", SS_RIGHT, 410, 168, 48, 20, ID_SCALE_VAL);
+        addTabCtrl(0, L"STATIC", tr(L"\u952E\u76D8\u914D\u8272", L"Keyboard"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, xC, y, 280, 220, ID_KB_COMBO);
+        addTabCtrl(0, L"BUTTON", tr(L"\u5BFC\u5165\u2026", L"Import..."), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_IMPORT_KB);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u671D\u5411\u89D2\u5EA6", L"Rotation"), SS_LEFT, 28, 200, 76, 20, 0);
-    HWND rotSb = addCtrl(L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, 110, 200, 290, 18, ID_ROT_SCROLL);
-    SetScrollRange(rotSb, SB_CTL, -180, 180, FALSE);
-    addCtrl(L"STATIC", L"0\u00B0", SS_RIGHT, 408, 200, 42, 20, ID_ROT_VAL);
-    addCtrl(L"BUTTON", tr(L"\u5F52\u96F6", L"0\u00B0"), BS_PUSHBUTTON | WS_TABSTOP, 458, 196, 54, 24, ID_BTN_ROT_ZERO);
+        addTabCtrl(0, L"STATIC", tr(L"\u77B3\u8272", L"Eye Color"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, xC, y, 280, 220, ID_EYE_COMBO);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6846\u9009\u8C03\u6574", L"Edit Box"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_EDIT_MODE);
+        y += dy;
 
-    addCtrl(L"BUTTON", tr(L"\u6C34\u5E73\u7FFB\u8F6C", L"Flip Horizontal"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 234, 140, 22, ID_CHK_FLIP);
-    addCtrl(L"BUTTON", tr(L"\u767D\u8272\u8D34\u7EB8\u63CF\u8FB9", L"White Sticker Outline"), BS_AUTOCHECKBOX | WS_TABSTOP, 180, 234, 180, 22, ID_CHK_OUTLINE);
-    addCtrl(L"BUTTON", tr(L"\u91CD\u7F6E\u4F4D\u7F6E\u4E0E\u671D\u5411", L"Reset Pose"), BS_PUSHBUTTON | WS_TABSTOP, 384, 232, 128, 24, ID_BTN_RESET_POS);
+        addTabCtrl(0, L"BUTTON", tr(L"\u767D\u8272\u5916\u63CF\u8FB9\uFF08\u8D34\u7EB8\u98CE\uFF09", L"White Sticker Outline"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y + 2, 220, 22, ID_CHK_OUTLINE);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6C34\u5E73\u955C\u50CF\u7FFB\u8F6C", L"Flip Horizontal"), BS_AUTOCHECKBOX | WS_TABSTOP, 270, y + 2, 210, 22, ID_CHK_FLIP);
+        y += dy;
 
-    // Section 2: Interaction & Effects
-    addCtrl(L"BUTTON", tr(L"\u4E92\u52A8\u4E0E\u7279\u6548", L"Interaction & Effects"), BS_GROUPBOX, 14, 284, 512, 208, 0, true);
-    addCtrl(L"BUTTON", tr(L"\u62CE\u8D77\u62D6\u62FD\u52A8\u753B", L"Scruff-Drag Lift Animation"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 310, 236, 22, ID_CHK_DRAG_ANIM);
-    addCtrl(L"BUTTON", tr(L"\u9AD8\u901F\u6253\u5B57\u751F\u6C14\u8868\u60C5", L"Angry Expression on Fast Typing"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 310, 236, 22, ID_CHK_ANGER);
-    addCtrl(L"BUTTON", tr(L"\u6478\u732B\u4E92\u52A8\u4E0E\u5495\u565C\u7279\u6548", L"Petting & Purr Sparkles"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 338, 236, 22, ID_CHK_PET);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u6309\u952E\u6C14\u6CE1", L"Show Keyboard Key Badges"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 338, 236, 22, ID_CHK_BADGES);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u9F20\u6807\u70B9\u51FB", L"Show Mouse Click Badges"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 366, 236, 22, ID_CHK_MOUSE_BADGES);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u952E\u76D8\u5B57\u7B26", L"Show Keycap Legends"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 366, 236, 22, ID_CHK_LEGENDS);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u8DD1\u9A6C\u706F\u6D41\u5149", L"Keyboard RGB Marquee"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 394, 236, 22, ID_CHK_MARQUEE);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 394, 236, 22, ID_CHK_LEVEL_KEYBOARD);
+        addTabCtrl(0, L"STATIC", tr(L"\u65CB\u8F6C\u89D2\u5EA6", L"Rotation"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        HWND rotSb = addTabCtrl(0, L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, xC, y + 3, 228, 18, ID_ROT_SCROLL);
+        SetScrollRange(rotSb, SB_CTL, -180, 180, FALSE);
+        addTabCtrl(0, L"STATIC", L"0\u00B0", SS_RIGHT, 354, y + 3, 44, 20, ID_ROT_VAL);
+        addTabCtrl(0, L"BUTTON", tr(L"\u56DE\u6B63 0\u00B0", L"Reset 0\u00B0"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_ROT_ZERO);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u591A\u952E\u6253\u5B57", L"Multi-Key"), SS_LEFT, 28, 426, 90, 20, 0);
-    HWND limbCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 124, 422, 388, 140, ID_TYPING_LIMB_COMBO);
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u540E\u811A + \u5C3E\u5DF4\uFF083\u952E\u540E\u811A / 4\u952E\u5C3E\u5DF4\uFF09", L"Hind Foot + Tail (3-Key / 4-Key)"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u7B2C\u4E09\u53EA\u811A\u6253\u5B57\uFF08\u4EC5\u540E\u811A\uFF09", L"3rd Hind Foot Only"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u5C3E\u5DF4\u6253\u5B57\uFF08\u4EC5\u5C3E\u5DF4\uFF09", L"Tail Typing Only"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u53EA\u7528\u4E24\u53EA\u722A\u722A\u6253\u5B57", L"Two Front Paws Only"));
+        addTabCtrl(0, L"STATIC", tr(L"\u684C\u5BA0\u5927\u5C0F", L"Scale"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        HWND scaleSb = addTabCtrl(0, L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, xC, y + 3, 228, 18, ID_SCALE_SCROLL);
+        SetScrollRange(scaleSb, SB_CTL, 45, 250, FALSE);
+        addTabCtrl(0, L"STATIC", L"100%", SS_RIGHT, 354, y + 3, 44, 20, ID_SCALE_VAL);
+        addTabCtrl(0, L"BUTTON", tr(L"\u91CD\u7F6E\u4F4D\u7F6E", L"Reset"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_RESET_POS);
+    }
 
-    addCtrl(L"STATIC", tr(L"\u6570\u4F4D\u677F\u6A21\u5F0F", L"Tablet Mode"), SS_LEFT, 28, 458, 90, 20, 0);
-    HWND tabCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 124, 454, 388, 120, ID_TABLET_COMBO);
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u81EA\u52A8\u68C0\u6D4B\uFF08\u8FDE\u63A5\u6570\u4F4D\u677F\u65F6\u81EA\u52A8\u5207\u6362\uFF09", L"Auto-Detect (Switch When Connected)"));
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u6570\u4F4D\u677F\u4E0E\u89E6\u63A7\u7B14", L"Always Show Tablet & Stylus"));
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse"));
+    // --- Tab 1: Interaction ---
+    {
+        const int xL = 36, xR = 268;
+        int y = 124;
+        const int dy = 38;
 
-    // Section 3: Window & System
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System"), BS_GROUPBOX, 14, 502, 512, 224, 0, true);
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 528, 236, 22, ID_CHK_TOPMOST);
-    addCtrl(L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 528, 236, 22, ID_CHK_AUTOHIDE_FS);
-    addCtrl(L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u4E34\u65F6\u89E3\u9501)", L"Full Click-Through (Hold Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 556, 236, 22, ID_CHK_CLICKTHROUGH);
-    addCtrl(L"BUTTON", tr(L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8", L"Launch at Startup"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 556, 236, 22, ID_CHK_AUTOSTART);
-    addCtrl(L"BUTTON", tr(L"\u59CB\u7EC8\u4EE5\u7BA1\u7406\u5458\u8EAB\u4EFD\u8FD0\u884C", L"Always Run as Administrator"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 584, 236, 22, ID_CHK_RUN_ADMIN);
-    addCtrl(L"BUTTON", app.isElevated ? tr(L"\u2713 \u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"\u2713 Running as Admin")
-                                      : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin"),
-            BS_PUSHBUTTON | WS_TABSTOP, 276, 582, 148, 24, ID_BTN_RELAUNCH_ADMIN);
-    addCtrl(L"BUTTON", tr(L"\u542C\u6B4C\u81EA\u52A8\u6234\u8033\u673A\uFF08\u97F3\u4E50/\u5A92\u4F53\u64AD\u653E\u5668\uFF09", L"Auto Headphones on Music"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 612, 340, 22, ID_CHK_AUTO_HEADPHONES);
+        addTabCtrl(1, L"BUTTON", tr(L"\u62CE\u8D77\u62D6\u62FD\u52A8\u753B", L"Scruff-Drag Lift Animation"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_DRAG_ANIM);
+        addTabCtrl(1, L"BUTTON", tr(L"\u6253\u5B57\u8FC7\u5FEB\u751F\u6C14\u8868\u60C5", L"Angry on Fast Typing"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_ANGER);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture"), SS_LEFT, 28, 646, 78, 20, 0);
-    HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 642, 210, 120, ID_OBS_COMBO);
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)"));
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3\uFF08\u9700 WGC \u91C7\u96C6\uFF09", L"OBS Transparent (Needs WGC)"));
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55\uFF08\u901A\u7528\u517C\u5BB9\uFF0C\u63A8\u8350\u76F4\u64AD\u59EC\uFF09", L"OBS Green Screen (Universal)"));
-    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 644, 180, 22, ID_CHK_OBS_HIDE);
+        addTabCtrl(1, L"BUTTON", tr(L"\u6478\u732B\u4E92\u52A8\u4E0E\u5495\u565C\u7279\u6548", L"Petting & Purr Sparkles"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_PET);
+        addTabCtrl(1, L"BUTTON", tr(L"\u663E\u793A\u6309\u952E\u6C14\u6CE1", L"Show Key Badges"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_BADGES);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language"), SS_LEFT, 28, 680, 78, 20, 0);
-    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 676, 150, 90, ID_LANG_COMBO);
-    SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
-    SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
-    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), BS_PUSHBUTTON | WS_TABSTOP, 290, 676, 106, 24, ID_BTN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir"), BS_PUSHBUTTON | WS_TABSTOP, 406, 676, 106, 24, ID_BTN_KB_DIR);
+        addTabCtrl(1, L"BUTTON", tr(L"\u663E\u793A\u9F20\u6807\u70B9\u51FB\u63D0\u793A", L"Show Mouse Badges"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_MOUSE_BADGES);
+        addTabCtrl(1, L"BUTTON", tr(L"\u663E\u793A\u952E\u76D8\u5B57\u7B26", L"Show Keycap Legends"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_LEGENDS);
+        y += dy;
+
+        addTabCtrl(1, L"BUTTON", tr(L"\u952E\u76D8\u8DD1\u9A6C\u706F\u6D41\u5149", L"Keyboard RGB Marquee"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_MARQUEE);
+        addTabCtrl(1, L"BUTTON", tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_LEVEL_KEYBOARD);
+        y += dy + 8;
+
+        addTabCtrl(1, L"STATIC", tr(L"\u591A\u952E\u6253\u5B57\u65B9\u5F0F", L"Multi-Key"), SS_LEFT, xL, y + 3, 96, 20, 0);
+        HWND limbCb = addTabCtrl(1, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 140, y, 344, 140, ID_TYPING_LIMB_COMBO);
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u540E\u811A + \u5C3E\u5DF4\uFF083\u952E\u540E\u811A / 4\u952E\u5C3E\u5DF4\uFF09", L"Hind Foot + Tail (3-Key / 4-Key)"));
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u4EC5\u540E\u811A\u6253\u5B57", L"3rd Hind Foot Only"));
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u4EC5\u5C3E\u5DF4\u6253\u5B57", L"Tail Typing Only"));
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u4EC5\u4E24\u53EA\u524D\u722A\u6253\u5B57", L"Two Front Paws Only"));
+        y += dy + 6;
+
+        addTabCtrl(1, L"STATIC", tr(L"\u6570\u4F4D\u677F\u4E0E\u89E6\u63A7\u7B14", L"Tablet & Stylus"), SS_LEFT, xL, y + 3, 96, 20, 0);
+        HWND tabCb = addTabCtrl(1, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 140, y, 344, 120, ID_TABLET_COMBO);
+        SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u81EA\u52A8\u68C0\u6D4B", L"Auto-Detect"));
+        SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u6570\u4F4D\u677F", L"Always Show Tablet"));
+        SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse"));
+    }
+
+    // --- Tab 2: System ---
+    {
+        const int xL = 36, xR = 268;
+        int y = 124;
+        const int dy = 38;
+
+        addTabCtrl(2, L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_TOPMOST);
+        addTabCtrl(2, L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_AUTOHIDE_FS);
+        y += dy;
+
+        addTabCtrl(2, L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u62D6\u52A8)", L"Full Click-Through (Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_CLICKTHROUGH);
+        addTabCtrl(2, L"BUTTON", tr(L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8", L"Launch at Startup"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_AUTOSTART);
+        y += dy;
+
+        addTabCtrl(2, L"BUTTON", tr(L"\u542C\u6B4C\u81EA\u52A8\u6234\u8033\u673A", L"Auto Headphones on Music"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_AUTO_HEADPHONES);
+        addTabCtrl(2, L"BUTTON", tr(L"\u59CB\u7EC8\u7BA1\u7406\u5458\u8FD0\u884C", L"Always Run as Admin"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_RUN_ADMIN);
+        y += dy;
+
+        addTabCtrl(2, L"BUTTON", app.isElevated ? tr(L"\u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"Running as Admin")
+                                                : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin"),
+                   BS_OWNERDRAW | WS_TABSTOP, xL, y, 150, 24, ID_BTN_RELAUNCH_ADMIN);
+        addTabCtrl(2, L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), BS_OWNERDRAW | WS_TABSTOP, 312, y, 82, 24, ID_BTN_SKINS_DIR);
+        addTabCtrl(2, L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards"), BS_OWNERDRAW | WS_TABSTOP, 402, y, 82, 24, ID_BTN_KB_DIR);
+        y += dy + 8;
+
+        addTabCtrl(2, L"STATIC", tr(L"OBS \u76F4\u64AD\u6355\u83B7", L"OBS Capture"), SS_LEFT, xL, y + 3, 96, 20, 0);
+        HWND obsCb = addTabCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 140, y, 200, 120, ID_OBS_COMBO);
+        SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)"));
+        SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3", L"OBS Transparent"));
+        SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55 (#00FF00)", L"OBS Green Screen"));
+        addTabCtrl(2, L"BUTTON", tr(L"\u540E\u53F0\u9690\u85CF\u684C\u9762", L"Hide Desktop"), BS_AUTOCHECKBOX | WS_TABSTOP, 350, y + 1, 134, 22, ID_CHK_OBS_HIDE);
+        y += dy + 6;
+
+        addTabCtrl(2, L"STATIC", tr(L"\u8BED\u8A00 / Language", L"Language"), SS_LEFT, xL, y + 3, 110, 20, 0);
+        HWND langCb = addTabCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 154, y, 160, 90, ID_LANG_COMBO);
+        SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
+        SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
+    }
+
+    // Bottom Clean Action Bar (no emoji)
+    addCtrl(L"BUTTON", tr(L"\u6279\u91CF\u5220\u9664\u76AE\u80A4", L"Batch Delete"), BS_OWNERDRAW | WS_TABSTOP, 20, H - 40, 148, 28, ID_BTN_BATCH_DEL_SKIN);
+    addCtrl(L"BUTTON", tr(L"\u5BFC\u5165\u76AE\u80A4\u2026", L"Import Skin..."), BS_OWNERDRAW | WS_TABSTOP, W - 20 - 128, H - 40, 128, 28, ID_BTN_DRESSING);
 
     settings_ui::rebuildCombosAndSync(app);
+    switchSettingsTab(app, app.settingsTab);
     ShowWindow(win, SW_SHOWNORMAL);
     SetForegroundWindow(win);
 }
