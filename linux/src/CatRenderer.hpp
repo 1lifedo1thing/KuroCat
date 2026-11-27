@@ -5243,26 +5243,51 @@ public:
             } else if (skin.colorpoint()) {
                 cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
                 const SkinColor& midC = pal.pointsMid.set ? pal.pointsMid : pal.legs;
-                cairo_pattern_add_color_stop_rgba(grad, 0.0,  pal.body.r, pal.body.g, pal.body.b, pal.body.a);
-                cairo_pattern_add_color_stop_rgba(grad, 0.20, pal.body.r, pal.body.g, pal.body.b, pal.body.a);
-                cairo_pattern_add_color_stop_rgba(grad, 0.54, midC.r,     midC.g,     midC.b,     midC.a);
-                cairo_pattern_add_color_stop_rgba(grad, 0.88, pal.paws.r, pal.paws.g, pal.paws.b, pal.paws.a);
+                const SkinColor& pointC = pal.points.set ? pal.points : pal.paws;
+                cairo_pattern_add_color_stop_rgba(grad, 0.0,  pal.body.r, pal.body.g, pal.body.b, 0.0);
+                cairo_pattern_add_color_stop_rgba(grad, 0.16, pal.body.r, pal.body.g, pal.body.b, pal.body.a);
+                if (pointC.sameAs(pal.paws)) {
+                    cairo_pattern_add_color_stop_rgba(grad, 0.48, midC.r,     midC.g,     midC.b,     midC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.78, pal.paws.r, pal.paws.g, pal.paws.b, pal.paws.a);
+                } else {
+                    cairo_pattern_add_color_stop_rgba(grad, 0.46, midC.r,     midC.g,     midC.b,     midC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.72, pointC.r,   pointC.g,   pointC.b,   pointC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.88, pal.paws.r, pal.paws.g, pal.paws.b, pal.paws.a);
+                }
                 cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
                 cairo_set_source(cr, grad);
                 cairo_paint(cr);
                 cairo_pattern_destroy(grad);
             } else if (auto pgIt = skin.partGradients.find(limbKey); pgIt != skin.partGradients.end()) {
                 paintClampedPartGradient(cr, pgIt->second, limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
-            } else if (!limb.isBehindBody && !pal.legs.sameAs(pal.body)) {
-                cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
-                cairo_pattern_add_color_stop_rgba(grad, 0.0,  pal.body.r, pal.body.g, pal.body.b, pal.body.a);
-                cairo_pattern_add_color_stop_rgba(grad, 0.14, pal.body.r, pal.body.g, pal.body.b, pal.body.a);
-                cairo_pattern_add_color_stop_rgba(grad, 0.42, pal.legs.r, pal.legs.g, pal.legs.b, pal.legs.a);
-                cairo_pattern_add_color_stop_rgba(grad, 0.82, pal.paws.r, pal.paws.g, pal.paws.b, pal.paws.a);
-                cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
-                cairo_set_source(cr, grad);
-                cairo_paint(cr);
-                cairo_pattern_destroy(grad);
+            } else if (!limb.isBehindBody) {
+                const SkinColor& legC = pal.legs;
+                const SkinColor& pawC = pal.paws;
+                if (pal.belly.set && !pal.belly.sameAs(legC)) {
+                    cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.0,  pal.belly.r, pal.belly.g, pal.belly.b, pal.belly.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.30, legC.r,      legC.g,      legC.b,      legC.a);
+                    if (!pawC.sameAs(legC)) {
+                        cairo_pattern_add_color_stop_rgba(grad, 0.68, legC.r, legC.g, legC.b, legC.a);
+                        cairo_pattern_add_color_stop_rgba(grad, 0.84, pawC.r, pawC.g, pawC.b, pawC.a);
+                    }
+                    cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                    cairo_set_source(cr, grad);
+                    cairo_paint(cr);
+                    cairo_pattern_destroy(grad);
+                } else if (!pawC.sameAs(legC)) {
+                    cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.0,  legC.r, legC.g, legC.b, legC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.68, legC.r, legC.g, legC.b, legC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.84, pawC.r, pawC.g, pawC.b, pawC.a);
+                    cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                    cairo_set_source(cr, grad);
+                    cairo_paint(cr);
+                    cairo_pattern_destroy(grad);
+                } else {
+                    setCol(cr, legC);
+                    cairo_paint(cr);
+                }
             } else {
                 cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
                 const SkinColor& legC = limb.isBehindBody && pal.hindLeg.set ? pal.hindLeg : pal.legs;

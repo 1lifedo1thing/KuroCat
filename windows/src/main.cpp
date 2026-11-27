@@ -29,7 +29,9 @@ using std::max;
 #include <vector>
 #include <unordered_set>
 #include <cmath>
+#include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -198,6 +200,7 @@ struct RenderedPoseSnapshot {
     int breath100 = 0, blink100 = 0, sleep100 = 0;
     int tail10 = 0, purr100 = 0, happy100 = 0;
     int sparkleCount = 0, zzzCount = 0, noteCount = 0;
+    int music100 = 0, musicPhase20 = 0, marquee20 = 0;
 
     bool operator==(const RenderedPoseSnapshot& o) const {
         return w == o.w && h == o.h &&
@@ -215,7 +218,8 @@ struct RenderedPoseSnapshot {
                leftPawY10 == o.leftPawY10 && rightPawY10 == o.rightPawY10 && thirdPawY10 == o.thirdPawY10 &&
                breath100 == o.breath100 && blink100 == o.blink100 && sleep100 == o.sleep100 &&
                tail10 == o.tail10 && purr100 == o.purr100 && happy100 == o.happy100 &&
-               sparkleCount == o.sparkleCount && zzzCount == o.zzzCount && noteCount == o.noteCount;
+               sparkleCount == o.sparkleCount && zzzCount == o.zzzCount && noteCount == o.noteCount &&
+               music100 == o.music100 && musicPhase20 == o.musicPhase20 && marquee20 == o.marquee20;
     }
 };
 
@@ -244,6 +248,7 @@ struct AppState {
     bool isVisible = true;
     bool hiddenByFullscreen = false;
     bool isDragging = false;
+    int dragMouseButton = 0; // 1 = primary (WM_LBUTTONDOWN), 2 = secondary (WM_RBUTTONDOWN when SM_SWAPBUTTON)
     int activeResizeCorner = -1; // -1 = none, 0=TL, 1=TR, 2=BL, 3=BR
     POINT resizeAnchorScreenPt = {};
     bool isRotating = false;
@@ -251,6 +256,7 @@ struct AppState {
     float rotateStartAngle = 0.0f;
     float rotateStartDeg = 0.0f;
     bool rButtonDown = false;
+    POINT rButtonDownCursor = {};
     bool pendingMenuAfterAlt = false;
     double pendingMenuAltUpTime = 0.0;
     POINT pendingMenuPt = {};
@@ -814,6 +820,20 @@ void startInAppUpdate(AppState& app) {
     }
 }
 
+void fillTrayTipText(const AppState& app, wchar_t* buf, size_t cap) {
+    const wchar_t* tip = nullptr;
+    if (app.settings.isEnglish) {
+        tip = app.isVisible
+            ? L"KuroCat Desktop Pet (Click to open menu)"
+            : L"KuroCat (Hidden - Click tray icon to show)";
+    } else {
+        tip = app.isVisible
+            ? L"KuroCat \u9ED1\u732B\u952E\u76D8\u684C\u5BA0 (\u53F3\u952E/\u5DE6\u952E\u6253\u5F00\u83DC\u5355)"
+            : L"KuroCat \u9ED1\u732B\u684C\u5BA0 (\u5DF2\u9690\u85CF \u00B7 \u70B9\u51FB\u6258\u76D8\u56FE\u6807\u6062\u590D\u663E\u793A)";
+    }
+    wcsncpy_s(buf, cap, tip, _TRUNCATE);
+}
+
 void registerTrayIcon(AppState& app) {
     if (!app.trayIcon) app.trayIcon = createCatTrayIcon();
     app.nid = {};
@@ -823,8 +843,37 @@ void registerTrayIcon(AppState& app) {
     app.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     app.nid.uCallbackMessage = WM_TRAYICON;
     app.nid.hIcon = app.trayIcon;
-    wcscpy_s(app.nid.szTip, L"KuroCat \u9ED1\u732B\u952E\u76D8\u684C\u5BA0 (\u53F3\u952E/\u5DE6\u952E\u6253\u5F00\u83DC\u5355)");
-    Shell_NotifyIconW(NIM_ADD, &app.nid);
+    fillTrayTipText(app, app.nid.szTip, sizeof(app.nid.szTip) / sizeof(app.nid.szTip[0]));
+    if (!Shell_NotifyIconW(NIM_ADD, &app.nid)) {
+        Shell_NotifyIconW(NIM_MODIFY, &app.nid);
+    }
+}
+
+void updateTrayTip(AppState& app) {
+    if (!app.nid.hWnd || !IsWindow(app.nid.hWnd)) return;
+    NOTIFYICONDATAW tipNid = app.nid;
+    tipNid.uFlags = NIF_TIP;
+    fillTrayTipText(app, tipNid.szTip, sizeof(tipNid.szTip) / sizeof(tipNid.szTip[0]));
+    if (!Shell_NotifyIconW(NIM_MODIFY, &tipNid)) {
+        registerTrayIcon(app);
+    } else {
+        wcscpy_s(app.nid.szTip, tipNid.szTip);
+    }
+}
+
+void ensureTrayIcon(AppState& app) {
+    if (!app.nid.hWnd || !IsWindow(app.nid.hWnd)) {
+        registerTrayIcon(app);
+        return;
+    }
+    NOTIFYICONDATAW mod = app.nid;
+    mod.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    fillTrayTipText(app, mod.szTip, sizeof(mod.szTip) / sizeof(mod.szTip[0]));
+    if (!Shell_NotifyIconW(NIM_MODIFY, &mod)) {
+        registerTrayIcon(app);
+    } else {
+        wcscpy_s(app.nid.szTip, mod.szTip);
+    }
 }
 
 HICON createCatTrayIcon() {
@@ -921,6 +970,30 @@ void assertTopmost(AppState& app) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
 }
 
+void setPetVisible(AppState& app, bool visible, bool showHintBalloon = false) {
+    app.isVisible = visible;
+    app.hiddenByFullscreen = false;
+    if (app.hwnd && IsWindow(app.hwnd)) {
+        ShowWindow(app.hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+        if (visible) {
+            double now = nowSeconds();
+            app.lastTickTime = now;
+            app.lastRenderTime = now;
+            app.nextFrameTime = now;
+            app.forceRedraw = true;
+            assertTopmost(app);
+        }
+    }
+    ensureTrayIcon(app);
+    if (!visible && showHintBalloon) {
+        bool en = app.settings.isEnglish;
+        showTrayBalloon(app,
+            en ? L"KuroCat is hidden in the system tray" : L"KuroCat \u5DF2\u9690\u85CF\u5230\u7CFB\u7EDF\u6258\u76D8",
+            en ? L"Click the KuroCat tray icon (check ^ hidden icons) to show the pet again."
+               : L"\u70B9\u51FB\u53F3\u4E0B\u89D2\u6258\u76D8\uFF08\u6216 ^ \u6298\u53E0\u533A\u57DF\uFF09\u4E2D\u7684\u5C0F\u732B\u56FE\u6807\u5373\u53EF\u91CD\u65B0\u663E\u793A\u684C\u5BA0\u3002");
+    }
+}
+
 void demoteTopmostForUpdateDialog(AppState& app) {
     if (app.hwnd && IsWindow(app.hwnd) && (GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
         SetWindowPos(app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -961,6 +1034,8 @@ void recoverAfterSystemEvent(AppState& app) {
     app.destroyBuffer();
     app.ulwFailures = 0;
     app.isDragging = false;
+    app.dragMouseButton = 0;
+    app.rButtonDown = false;
     app.lastTickTime = now;
     app.nextFrameTime = 0.0;
     app.lastRenderTime = now;
@@ -971,13 +1046,52 @@ void recoverAfterSystemEvent(AppState& app) {
     app.pendingTopmostTime = now + 1.5; // some games re-assert topmost shortly after a mode switch
 }
 
+static std::wstring queryProcessBaseNameLower(DWORD pid) {
+    if (pid == 0) return L"";
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return L"";
+    std::wstring res;
+    wchar_t path[MAX_PATH * 2] = {};
+    DWORD sz = (DWORD)(sizeof(path) / sizeof(path[0]));
+    if (QueryFullProcessImageNameW(hProc, 0, path, &sz) && sz > 0) {
+        const wchar_t* base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        res = base;
+        for (wchar_t& ch : res) ch = (wchar_t)towlower(ch);
+    }
+    CloseHandle(hProc);
+    return res;
+}
+
+static bool isKnownMediaOrBrowserProcess(const std::wstring& procName) {
+    if (procName.empty()) return false;
+    static const wchar_t* kApps[] = {
+        L"cloudmusic.exe", L"qqmusic.exe", L"spotify.exe", L"kugou.exe",
+        L"kwmusic.exe", L"kuwomusic.exe", L"sodamusic.exe", L"qishui.exe",
+        L"applemusic.exe", L"itunes.exe", L"foobar2000.exe", L"musicbee.exe",
+        L"aimp.exe", L"lx-music-desktop.exe", L"yesplaymusic.exe", L"cider.exe",
+        L"potplayermini64.exe", L"potplayermini.exe", L"vlc.exe", L"mpv.exe",
+        L"mpc-hc64.exe", L"mpc-be64.exe", L"wmplayer.exe", L"microsoft.media.player.exe",
+        L"tidal.exe", L"youtube music.exe", L"bilibili.exe", L"listen1.exe",
+        L"zyplayer.exe", L"kodi.exe", L"audacious.exe",
+        L"chrome.exe", L"msedge.exe", L"firefox.exe", L"brave.exe",
+        L"opera.exe", L"opera_gx.exe", L"vivaldi.exe", L"arc.exe"
+    };
+    for (const wchar_t* appName : kApps) {
+        if (procName == appName) return true;
+    }
+    return false;
+}
+
 /// Returns true when any active audio output endpoint (speakers, 3.5mm/USB/Bluetooth headphones)
 /// currently has a non-system application outputting audible audio (videos, browsers, Apple Music,
 /// music players, etc.). Uses WASAPI endpoint enumeration + AudioSessionState + IAudioMeterInformation,
-/// with a safe fallback for Win11 Bluetooth A2DP / hardware-offloaded endpoints whose GetPeakValue()
-/// reports 0.0f while audio is actively playing.
+/// checking both session-level and endpoint-level meters (fixes browsers / hardware-offloaded /
+/// spatial audio streams whose session peak reports 0.0f while endpoint peak > 0) plus a safe
+/// per-session fallback for Win11 Bluetooth A2DP / offload endpoints whose meters stay at 0.0f.
 static bool isSystemAudioPlaying() {
-    static std::unordered_set<std::wstring> s_meterWorkingDevices;
+    static std::unordered_set<std::wstring> s_sessionMeterWorkingKeys;
+    static std::unordered_set<std::wstring> s_epMeterWorkingDevices;
 
     IMMDeviceEnumerator* enumerator = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
@@ -1063,9 +1177,11 @@ static bool isSystemAudioPlaying() {
                     AudioSessionState st = AudioSessionStateInactive;
                     if (SUCCEEDED(ctrl->GetState(&st)) && st == AudioSessionStateActive) {
                         bool isSystemSound = false;
+                        DWORD sessionPid = 0;
                         IAudioSessionControl2* ctrl2 = nullptr;
                         if (SUCCEEDED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2)) && ctrl2) {
                             if (ctrl2->IsSystemSoundsSession() == S_OK) isSystemSound = true;
+                            ctrl2->GetProcessId(&sessionPid);
                             ctrl2->Release();
                         }
                         bool sessionMuted = false;
@@ -1079,6 +1195,10 @@ static bool isSystemAudioPlaying() {
                             sVol->Release();
                         }
                         if (!isSystemSound && !sessionMuted && sessionVolume > 0.001f) {
+                            std::wstring procName = queryProcessBaseNameLower(sessionPid);
+                            std::wstring sessionKey = devId + L"|"
+                                + (!procName.empty() ? procName
+                                    : (sessionPid != 0 ? (L"pid:" + std::to_wstring(sessionPid)) : L"sys"));
                             float sPeak = 0.0f;
                             bool hasSessionPeak = false;
                             IAudioMeterInformation* sMeter = nullptr;
@@ -1088,15 +1208,28 @@ static bool isSystemAudioPlaying() {
                                 }
                                 sMeter->Release();
                             }
-                            if (hasSessionPeak && sPeak > 0.0008f) {
-                                if (!devId.empty()) s_meterWorkingDevices.insert(devId);
+                            if (hasSessionPeak && sPeak > 0.0001f) {
+                                if (!devId.empty()) {
+                                    if (s_sessionMeterWorkingKeys.size() > 256) s_sessionMeterWorkingKeys.clear();
+                                    s_sessionMeterWorkingKeys.insert(sessionKey);
+                                }
                                 found = true;
-                            } else if (hasEpMeter && epPeak > 0.001f && !hasSessionPeak) {
+                            } else if (hasEpMeter && epPeak > 0.00015f) {
+                                // Some browser / spatial / hardware-offloaded sessions report sPeak == 0.0f
+                                // while the endpoint meter itself clearly reports audible playback.
+                                if (!devId.empty()) {
+                                    if (s_epMeterWorkingDevices.size() > 256) s_epMeterWorkingDevices.clear();
+                                    s_epMeterWorkingDevices.insert(devId);
+                                }
                                 found = true;
                             } else if (!hasEpMeter || epMeterChannels == 0 || !hasSessionPeak ||
-                                       devId.empty() || s_meterWorkingDevices.find(devId) == s_meterWorkingDevices.end()) {
-                                // Endpoint meter has never reported non-zero session peaks (e.g. Win11 Bluetooth A2DP
-                                // / hardware-offloaded stream) or metering is unavailable: trust active unmuted session.
+                                       devId.empty() ||
+                                       (s_sessionMeterWorkingKeys.find(sessionKey) == s_sessionMeterWorkingKeys.end() &&
+                                        s_epMeterWorkingDevices.find(devId) == s_epMeterWorkingDevices.end())) {
+                                // Metering has never reported non-zero peaks for this session/endpoint
+                                // (e.g. Win11 BT A2DP, hardware offload, or exclusive mode): trust active session.
+                                found = true;
+                            } else if (isKnownMediaOrBrowserProcess(procName) && hasEpMeter && epPeak > 0.00005f) {
                                 found = true;
                             }
                         }
@@ -1122,10 +1255,15 @@ void housekeeping(AppState& app) {
     if (!app.hwnd) return;
 
     // Read background WASAPI polling result without blocking the UI thread
+    bool prevMusic = app.physics.isMusicPlaying;
     app.audioPollingEnabled.store(app.settings.autoHeadphonesOnMusic, std::memory_order_relaxed);
     app.physics.isMusicPlaying = app.settings.autoHeadphonesOnMusic
         ? app.audioSustainedPlaying.load(std::memory_order_relaxed)
         : false;
+    if (app.physics.isMusicPlaying != prevMusic) {
+        app.forceRedraw = true;
+        app.nextFrameTime = std::min(app.nextFrameTime, now);
+    }
 
     bool fullscreenFg = isForegroundFullscreen(app.hwnd);
     bool obsBg = (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop);
@@ -1611,6 +1749,7 @@ LRESULT CALLBACK dressingRoomProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+
         case WM_DESTROY:
             if (app && app->dressingRoom == hwnd) app->dressingRoom = nullptr;
             return 0;
@@ -2460,6 +2599,7 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     if (newEn != app->settings.isEnglish) {
                         app->settings.isEnglish = newEn;
                         app->settings.saveToRegistry();
+                        updateTrayTip(*app);
                         DestroyWindow(hwnd);
                         showSettingsWindow(*app);
                     }
@@ -2611,6 +2751,7 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+
         case WM_DESTROY:
             if (app && app->settingsWnd == hwnd) {
                 app->settingsWnd = nullptr;
@@ -2932,6 +3073,7 @@ LRESULT CALLBACK updateWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+
         case WM_DESTROY:
             if (app && app->updateWnd == hwnd) {
                 app->updateWnd = nullptr;
@@ -3170,7 +3312,7 @@ void handleUpdateDownloadResult(AppState& app, const UpdateDownloadResult& res) 
         launched = launchProcessArgs(res.newExePath, args);
     }
     if (launched) {
-        PostQuitMessage(0);
+        quitApp(app);
         return;
     }
     bool en = app.settings.isEnglish;
@@ -3216,7 +3358,12 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // Essential quick actions
-    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_VISIBLE, app.isVisible ? tr(L"\u9690\u85CF\u684C\u5BA0", L"Hide Pet") : tr(L"\u663E\u793A\u684C\u5BA0", L"Show Pet"));
+    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_VISIBLE,
+        app.isVisible ? tr(L"\u9690\u85CF\u684C\u5BA0", L"Hide Pet")
+                      : tr(L"\U0001F431 \u663E\u793A\u684C\u5BA0", L"\U0001F431 Show Pet"));
+    if (!app.isVisible) {
+        SetMenuDefaultItem(menu, CMD_TOGGLE_VISIBLE, FALSE);
+    }
 
     // Quick Cat Skin switcher
     HMENU coatMenu = CreatePopupMenu();
@@ -3308,9 +3455,7 @@ void showContextMenu(AppState& app, POINT screenPt) {
 
     switch (cmd) {
         case CMD_TOGGLE_VISIBLE:
-            app.isVisible = !app.isVisible;
-            app.hiddenByFullscreen = false;
-            ShowWindow(app.hwnd, app.isVisible ? SW_SHOWNOACTIVATE : SW_HIDE);
+            setPetVisible(app, !app.isVisible, true);
             break;
         case CMD_TOGGLE_CLICKTHROUGH:
             app.settings.fullClickThrough = !app.settings.fullClickThrough;
@@ -3401,10 +3546,12 @@ void showContextMenu(AppState& app, POINT screenPt) {
         case CMD_LANG_ZH:
             app.settings.isEnglish = false;
             app.settings.saveToRegistry();
+            updateTrayTip(app);
             break;
         case CMD_LANG_EN:
             app.settings.isEnglish = true;
             app.settings.saveToRegistry();
+            updateTrayTip(app);
             break;
         case CMD_TABLET_AUTO:
             app.settings.tabletMode = 0;
@@ -3667,11 +3814,7 @@ void tickAndRender(AppState& app) {
                             app.physics.registerPetStroke(cp, d, true, app.settings);
                             if (app.physics.totalPetSessions != app.lastSavedPetSessions) {
                                 app.lastSavedPetSessions = app.physics.totalPetSessions;
-                                app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+                                CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
                             }
                         }
                     }
@@ -3743,9 +3886,11 @@ void tickAndRender(AppState& app) {
     curPose.activeKeyHash = kh;
     curPose.totalKeystrokesToday = app.input.totalKeystrokesToday;
     curPose.totalPetSessions = app.physics.totalPetSessions;
-    curPose.headY10 = (int)std::lround(app.physics.headOffsetY.value * 10.0f);
+    curPose.headX10 = (int)std::lround(app.physics.bodyShiftX.value * 10.0f + app.physics.headYaw.value * 20.0f);
+    curPose.headY10 = (int)std::lround(app.physics.headOffsetY.value * 10.0f + app.physics.headPitch.value * 20.0f);
     curPose.leftPawY10 = (int)std::lround(app.physics.leftPaw.y.value * 10.0f);
     curPose.rightPawY10 = (int)std::lround(app.physics.rightPaw.y.value * 10.0f);
+    curPose.thirdPawY10 = (int)std::lround(app.physics.hindFoot.y.value * 10.0f);
     curPose.breath100 = (int)std::lround(app.physics.breathingOffset() * 100.0f);
     curPose.blink100 = (int)std::lround(app.physics.blinkProgress() * 100.0f);
     curPose.sleep100 = (int)std::lround(app.physics.sleepiness * 100.0f);
@@ -3753,6 +3898,9 @@ void tickAndRender(AppState& app) {
     curPose.purr100 = (int)std::lround(app.physics.petHeadIntensity * 100.0f);
     curPose.happy100 = (int)std::lround(app.physics.petBodyIntensity * 100.0f);
     curPose.sparkleCount = (int)app.physics.sparkles.size();
+    curPose.music100 = (int)std::lround(app.physics.musicIntensity * 100.0f);
+    curPose.musicPhase20 = (app.physics.musicIntensity > 0.01f) ? (int)std::lround(app.physics.musicPhase * 20.0f) : 0;
+    curPose.marquee20 = app.settings.keyboardMarquee ? (int)std::lround(app.physics.marqueePhase * 20.0f) : 0;
 
     if (!app.forceRedraw && curPose == app.lastRenderedPose) {
         return;
@@ -3813,6 +3961,7 @@ double desiredFrameInterval(const AppState& app, double now) {
                   app.physics.petHeadIntensity > 0.05f ||
                   app.physics.petBodyIntensity > 0.05f;
     if (active) return FRAME_INTERVAL; // 60 Hz when active
+    if (app.physics.musicIntensity > 0.01f || app.physics.isMusicPlaying) return 0.05; // 20 Hz for smooth headphones & rhythm
     if (app.physics.sleepiness > 0.5f) return 0.10; // 10 Hz when sleeping
     return 0.05; // 20 Hz when idle awake
 }
@@ -3983,6 +4132,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                 }
                 app->isDragging = true;
+                app->dragMouseButton = 1;
                 app->dragStartCursor = cur;
                 app->dragStartWinOrigin = { wr.left, wr.top };
                 app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
@@ -4035,7 +4185,43 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetWindowPos(hwnd, nullptr, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
                 return 0;
             }
+            // When Windows mouse buttons are swapped (SM_SWAPBUTTON), also allow dragging via the
+            // secondary button (physical left) once moved past the drag threshold, while preserving
+            // normal click-to-open-menu when released without dragging.
+            if (app && hwnd == app->hwnd && app->rButtonDown && !app->isDragging && GetSystemMetrics(SM_SWAPBUTTON) != 0) {
+                POINT cur = {};
+                GetCursorPos(&cur);
+                int threshX = std::max(5, GetSystemMetrics(SM_CXDRAG));
+                int threshY = std::max(5, GetSystemMetrics(SM_CYDRAG));
+                if (std::abs(cur.x - app->rButtonDownCursor.x) >= threshX ||
+                    std::abs(cur.y - app->rButtonDownCursor.y) >= threshY) {
+                    RECT wr = {};
+                    GetWindowRect(hwnd, &wr);
+                    app->rButtonDown = false;
+                    app->isDragging = true;
+                    app->dragMouseButton = 2;
+                    app->dragStartCursor = app->rButtonDownCursor;
+                    app->dragStartWinOrigin = { wr.left, wr.top };
+                    app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
+                }
+            }
             if (app && app->isDragging) {
+                bool activeBtnDown = (app->dragMouseButton == 2)
+                    ? ((wParam & MK_RBUTTON) != 0)
+                    : ((wParam & MK_LBUTTON) != 0);
+                if (!activeBtnDown) {
+                    app->isDragging = false;
+                    app->dragMouseButton = 0;
+                    app->physics.setDragging(false);
+                    if (GetCapture() == hwnd) ReleaseCapture();
+                    RECT wr = {};
+                    GetWindowRect(hwnd, &wr);
+                    app->settings.posX = wr.left;
+                    app->settings.posY = wr.top;
+                    app->settings.saveToRegistry();
+                    refreshSettingsWindow(*app);
+                    return 0;
+                }
                 POINT cur = {};
                 GetCursorPos(&cur);
                 RECT wr = {};
@@ -4075,10 +4261,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 refreshSettingsWindow(*app);
                 return 0;
             }
-            if (app && app->isDragging) {
+            if (app && app->isDragging && app->dragMouseButton != 2) {
                 app->isDragging = false;
+                app->dragMouseButton = 0;
                 app->physics.setDragging(false);
-                ReleaseCapture();
+                if (GetCapture() == hwnd) ReleaseCapture();
                 RECT wr = {};
                 GetWindowRect(hwnd, &wr);
                 app->settings.posX = wr.left;
@@ -4111,25 +4298,41 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 bool altHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
                 if (!app->settings.fullClickThrough || altHeld) {
                     app->rButtonDown = true;
+                    GetCursorPos(&app->rButtonDownCursor);
                     SetCapture(hwnd);
                 }
             }
             return 0;
 
         case WM_RBUTTONUP:
-            if (app && hwnd == app->hwnd && app->rButtonDown) {
-                app->rButtonDown = false;
-                if (GetCapture() == hwnd) ReleaseCapture();
-                POINT pt = {};
-                GetCursorPos(&pt);
-                if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) {
-                    // Defer opening the popup menu until shortly after Alt is released so Windows'
-                    // WM_SYSKEYUP/SC_KEYMENU finishes cleanly before TrackPopupMenu enters its modal loop.
-                    app->pendingMenuAfterAlt = true;
-                    app->pendingMenuAltUpTime = 0.0;
-                    app->pendingMenuPt = pt;
-                } else {
-                    showContextMenu(*app, pt);
+            if (app && hwnd == app->hwnd) {
+                if (app->isDragging && app->dragMouseButton == 2) {
+                    app->isDragging = false;
+                    app->dragMouseButton = 0;
+                    app->physics.setDragging(false);
+                    if (GetCapture() == hwnd) ReleaseCapture();
+                    RECT wr = {};
+                    GetWindowRect(hwnd, &wr);
+                    app->settings.posX = wr.left;
+                    app->settings.posY = wr.top;
+                    app->settings.saveToRegistry();
+                    refreshSettingsWindow(*app);
+                    return 0;
+                }
+                if (app->rButtonDown) {
+                    app->rButtonDown = false;
+                    if (GetCapture() == hwnd) ReleaseCapture();
+                    POINT pt = {};
+                    GetCursorPos(&pt);
+                    if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) {
+                        // Defer opening the popup menu until shortly after Alt is released so Windows'
+                        // WM_SYSKEYUP/SC_KEYMENU finishes cleanly before TrackPopupMenu enters its modal loop.
+                        app->pendingMenuAfterAlt = true;
+                        app->pendingMenuAltUpTime = 0.0;
+                        app->pendingMenuPt = pt;
+                    } else {
+                        showContextMenu(*app, pt);
+                    }
                 }
             }
             return 0;
@@ -4142,6 +4345,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CAPTURECHANGED:
             if (app && hwnd == app->hwnd) {
                 app->rButtonDown = false;
+                app->dragMouseButton = 0;
                 if (app->isDragging) {
                     app->isDragging = false;
                     app->physics.setDragging(false);
@@ -4150,7 +4354,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_TRAYICON:
-            if (app && (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP || lParam == WM_CONTEXTMENU)) {
+            if (app && lParam == WM_LBUTTONDBLCLK) {
+                if (!app->isVisible || app->hiddenByFullscreen) {
+                    setPetVisible(*app, true);
+                }
+            } else if (app && (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP || lParam == WM_CONTEXTMENU)) {
                 POINT pt = {};
                 GetCursorPos(&pt);
                 showContextMenu(*app, pt);
@@ -4180,9 +4388,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     app->settings.fullClickThrough = false;
                     app->settings.saveToRegistry();
                 }
-                if (!app->isVisible) {
-                    app->isVisible = true;
-                    ShowWindow(app->hwnd, SW_SHOWNOACTIVATE);
+                if (!app->isVisible || app->hiddenByFullscreen) {
+                    setPetVisible(*app, true);
                 }
                 POINT pt = {};
                 GetCursorPos(&pt);
@@ -4261,6 +4468,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else DragFinish((HDROP)wParam);
             return 0;
 
+        case WM_CLOSE:
+            if (app && hwnd == app->menuOwnerHwnd) return 0;
+            break;
+
         case WM_DESTROY:
             if (hwnd == (app ? app->hwnd : nullptr)) {
                 KillTimer(hwnd, TIMER_RENDER);
@@ -4273,14 +4484,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         UnhookWinEvent(app->foregroundHook);
                         app->foregroundHook = nullptr;
                     }
+                    // Delete tray icon while menuOwnerHwnd (nid.hWnd) is still a valid window!
+                    Shell_NotifyIconW(NIM_DELETE, &app->nid);
+                    app->nid.hWnd = nullptr;
+                    if (app->trayIcon) { DestroyIcon(app->trayIcon); app->trayIcon = nullptr; }
                     if (app->menuOwnerHwnd) {
                         UnregisterHotKey(app->menuOwnerHwnd, HOTKEY_CLICKTHROUGH_ID);
                         RemovePropW(app->menuOwnerHwnd, VERSION_PROP);
                         DestroyWindow(app->menuOwnerHwnd);
                         app->menuOwnerHwnd = nullptr;
                     }
-                    Shell_NotifyIconW(NIM_DELETE, &app->nid);
-                    if (app->trayIcon) DestroyIcon(app->trayIcon);
                     if (app->dressingRoom) DestroyWindow(app->dressingRoom);
                     if (app->updateWnd && IsWindow(app->updateWnd)) {
                         app->replacingUpdateWnd = true;
@@ -4469,12 +4682,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (app.settings.runAsAdmin && !app.isElevated && !noElevate) {
         if (hMutex) { CloseHandle(hMutex); hMutex = nullptr; }
         if (relaunchSelfElevated(L"--takeover --no-elevate")) {
-            app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
-    g_app = nullptr;
+            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            g_app = nullptr;
             return 0;
         }
         hMutex = CreateMutexW(nullptr, FALSE, kMutexName);
@@ -4498,17 +4707,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (today != app.statsDay) {
             app.statsDay = today;
             app.input.totalKeystrokesToday = 1;
-            app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
         } else if (app.input.totalKeystrokesToday % 10 == 0) {
-            app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
         }
         app.physics.triggerKeyDown(k, app.settings, activeSkin(app).typingStyle == SkinTypingStyle::Douni, &app.input.activeKeys);
     };
@@ -4614,18 +4815,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     app.audioThread = std::thread([&app]() {
         HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         double sustainedSince = 0.0;
+        double lastPlayingSeen = 0.0;
         while (!app.audioThreadStop.load(std::memory_order_relaxed)) {
             if (app.audioPollingEnabled.load(std::memory_order_relaxed)) {
                 double t = nowSeconds();
                 if (isSystemAudioPlaying()) {
                     if (sustainedSince == 0.0) sustainedSince = t;
-                    app.audioSustainedPlaying.store((t - sustainedSince) >= 1.2, std::memory_order_relaxed);
+                    lastPlayingSeen = t;
+                    if ((t - sustainedSince) >= 1.2) {
+                        app.audioSustainedPlaying.store(true, std::memory_order_relaxed);
+                    }
                 } else {
-                    sustainedSince = 0.0;
-                    app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
+                    bool wasPlaying = app.audioSustainedPlaying.load(std::memory_order_relaxed);
+                    if (wasPlaying && (t - lastPlayingSeen) < 1.8) {
+                        // Brief pause/silence tolerance (< 1.8s) so headphones don't flicker between tracks or speech pauses.
+                    } else {
+                        sustainedSince = 0.0;
+                        app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
+                    }
                 }
             } else {
                 sustainedSince = 0.0;
+                lastPlayingSeen = 0.0;
                 app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
             }
             std::unique_lock<std::mutex> lk(app.audioThreadMu);

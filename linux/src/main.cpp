@@ -136,6 +136,8 @@ struct LinuxApp {
     std::string availableUpdateVersion;
     std::string availableUpdateUrl;
     bool isUpdating = false;
+    bool isCheckingUpdates = false;
+    bool pendingManualUpdateCheck = false;
 
     // Cached window geometry (updated from configure-event). Querying it from the X server every
     // frame cost several synchronous round-trips per frame.
@@ -625,6 +627,14 @@ static std::string fetchUrlBody(const char* url) {
 static void startInAppUpdate();
 
 static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
+    if (g_app) {
+        if (g_app->isCheckingUpdates) {
+            if (manual) g_app->pendingManualUpdateCheck = true;
+            return;
+        }
+        g_app->isCheckingUpdates = true;
+        g_app->pendingManualUpdateCheck = manual;
+    }
     std::thread([manual, delayMs]() {
         if (delayMs > 0) usleep((useconds_t)delayMs * 1000);
         auto* res = new LinuxUpdateResult();
@@ -648,10 +658,16 @@ static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
 
         g_idle_add(+[](gpointer data) -> gboolean {
             auto* r = static_cast<LinuxUpdateResult*>(data);
+            bool isManual = r->manual;
+            if (g_app) {
+                isManual = isManual || g_app->pendingManualUpdateCheck;
+                g_app->isCheckingUpdates = false;
+                g_app->pendingManualUpdateCheck = false;
+            }
             if (g_app && r->ok && r->hasUpdate) {
                 g_app->availableUpdateVersion = r->latestTag;
                 g_app->availableUpdateUrl = r->releaseUrl;
-                if (!r->manual && g_app->settings.suppressAutoUpdatePrompt) {
+                if (!isManual && g_app->settings.suppressAutoUpdatePrompt) {
                     delete r;
                     return G_SOURCE_REMOVE;
                 }
@@ -670,11 +686,11 @@ static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
                     g_app->settings.suppressAutoUpdatePrompt = false;
                     g_app->settings.save();
                     startInAppUpdate();
-                } else {
+                } else if (resp == GTK_RESPONSE_NO) {
                     g_app->settings.suppressAutoUpdatePrompt = true;
                     g_app->settings.save();
                 }
-            } else if (r->manual) {
+            } else if (isManual) {
                 GtkWidget* dlg = gtk_message_dialog_new(
                     nullptr, GTK_DIALOG_MODAL,
                     r->ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
@@ -790,7 +806,19 @@ static void startInAppUpdate() {
                     execl(p->second.c_str(), p->second.c_str(), nullptr);
                     _exit(127);
                 }
-                gtk_main_quit();
+                if (pid > 0) {
+                    gtk_main_quit();
+                } else {
+                    acquireSingleInstance();
+                    GtkWidget* dlg = gtk_message_dialog_new(
+                        nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+                        "重启失败");
+                    gtk_message_dialog_format_secondary_text(
+                        GTK_MESSAGE_DIALOG(dlg),
+                        "新版本已安装到 %s，请手动重启 KuroCat。", p->second.c_str());
+                    gtk_dialog_run(GTK_DIALOG(dlg));
+                    gtk_widget_destroy(dlg);
+                }
             } else {
                 GtkWidget* dlg = gtk_message_dialog_new(
                     nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO,
@@ -2213,6 +2241,10 @@ static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
                 startInAppUpdate();
             }));
         }
+    } else if (app.isCheckingUpdates) {
+        GtkWidget* item = gtk_menu_item_new_with_label(tr("⏳ 正在检查更新...", "⏳ Checking for Updates..."));
+        gtk_widget_set_sensitive(item, FALSE);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
     } else {
         std::string lbl = std::string(tr("检查更新 (当前 v", "Check for Updates (v")) + APP_VERSION + ")";
         addAction(lbl.c_str(), G_CALLBACK(+[](GtkMenuItem*, gpointer) {

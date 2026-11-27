@@ -8378,20 +8378,47 @@ enum CatRenderer {
                 }
             } else if skin.colorpoint {
                 let mid = pal.pointsMid ?? pal.legs
-                let cols = [sc(pal.body, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
-                if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.20, 0.54, 0.88]) {
-                    ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                let pointCol = pal.points ?? pal.paws
+                if pointCol == pal.paws {
+                    let cols = [sc(pal.body, 0.0, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
+                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.16, 0.48, 0.78]) {
+                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsAfterEndLocation])
+                    }
+                } else {
+                    let cols = [sc(pal.body, 0.0, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pointCol, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
+                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.16, 0.46, 0.72, 0.88]) {
+                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsAfterEndLocation])
+                    }
                 }
             } else if let armSpace = limb.armSpace, let limbGrad = skin.partGradients[armSpace.rawValue] {
                 drawClampedPartGradient(in: ctx, limbGrad, start: limb.root, end: limb.tip, srgb: srgb)
-            } else if !limb.isBehindBody && pal.legs != pal.body {
-                let cols = [sc(pal.body, skin).cgColor, sc(pal.body, skin).cgColor, sc(pal.legs, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
-                if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.14, 0.42, 0.82]) {
-                    ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            } else if !limb.isBehindBody {
+                let legCol = pal.legs
+                let pawCol = pal.paws
+                if let chest = pal.belly, chest != legCol {
+                    if pawCol != legCol {
+                        let cols = [sc(chest, skin).cgColor, sc(legCol, skin).cgColor, sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
+                        if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.30, 0.68, 0.84]) {
+                            ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                        }
+                    } else {
+                        let cols = [sc(chest, skin).cgColor, sc(legCol, skin).cgColor] as CFArray
+                        if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.30]) {
+                            ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                        }
+                    }
+                } else if pawCol != legCol {
+                    let cols = [sc(legCol, skin).cgColor, sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
+                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.68, 0.84]) {
+                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                    }
+                } else {
+                    ctx.setFillColor(sc(legCol, skin).cgColor)
+                    ctx.fillPath()
                 }
             } else {
-                let legCol = limb.isBehindBody ? (pal.hindLeg ?? pal.legs) : pal.legs
-                let pawCol = limb.isBehindBody ? (pal.hindPaw ?? pal.paws) : pal.paws
+                let legCol = pal.hindLeg ?? pal.legs
+                let pawCol = pal.hindPaw ?? pal.paws
                 let cols = [sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
                 if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.22, 0.75]) {
                     ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
