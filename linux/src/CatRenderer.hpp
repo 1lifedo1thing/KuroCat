@@ -299,7 +299,7 @@ public:
         Pt pt = { 180.0f, 58.0f };
         if (skin.renderStyle != SkinRenderStyle::Beagle) {
             float hs = skin.shape.headScale;
-            const CoatBuild& bd = buildOf(skin);
+            const auto& bd = buildOf(skin);
             pt.y = 82.0f + (hs - 1.0f) * 6.0f + bd.crownBaseY * hs - 6.2f * hs;
         }
         if (flipped) {
