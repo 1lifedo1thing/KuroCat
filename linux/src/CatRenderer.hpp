@@ -377,25 +377,10 @@ public:
 
         // Universal Scruff-Lifted Drag Pose (ALL non-Douni cat skins keep their own authentic KuroCat face/head/ears/markings in front,
         // with scruff-lifted arched neck/back, 4 dangling swinging paws, and limp drooping tail!)
-        if (scruff > 0.005f && !seatedOnlyPass()) {
-            // Cross-fade: the seated cat (rising with the lift) fades out under the hanging cat, and back in on drop.
-            double hangAlpha = smoothstepD(0.0, 0.45, (double)scruff);
-            if (hangAlpha < 0.995) {
-                cairo_save(cr);
-                cairo_set_matrix(cr, &baseMatrix);
-                cairo_push_group(cr);
-                CatSettings seatedSettings = settings;
-                seatedSettings.isEditMode = false;
-                seatedOnlyPass() = true;
-                draw(cr, physics, seatedSettings, skin, kbSkin);
-                seatedOnlyPass() = false;
-                cairo_pop_group_to_source(cr);
-                cairo_paint_with_alpha(cr, 1.0 - hangAlpha);
-                cairo_restore(cr);
-            }
+        if (scruff > 0.005f) {
             drawNativeScruffDragCat(cr, physics, skin, settings.eyeTheme, kbSkin, settings.keyboardTheme,
                                     settings.showKeyLegends, settings.keyboardMarquee, settings.overrideSkinIris, (double)scruff,
-                                    settings.flipHorizontal, settings.pureScruffDrag);
+                                    settings.flipHorizontal);
             if (!physics.floatingKeycaps.empty()) {
                 drawFloatingKeycaps(cr, physics, settings.flipHorizontal);
             }
@@ -4948,30 +4933,31 @@ public:
     static void drawNativeScruffDragCat(cairo_t* cr, const CatPhysics& physics, const SkinSpec& skin,
                                         EyeColorTheme eyeTheme, const KeyboardSkinSpec& kbSkin,
                                         KeyboardTheme kbTheme, bool showKeyLegends, bool keyboardMarquee,
-                                        bool overrideSkinIris, double lift, bool flipped = false,
-                                        bool pureLift = false) {
-        double carry = smoothstepD(0.0, 0.90, lift);
+                                        bool overrideSkinIris, double lift, bool flipped = false) {
         double liftS = smoothstepD(0.0, 1.0, lift);
-        // startle = 1: compact "just grabbed / just set down" pose, 0: fully limp hang. Eased both ways, never switched.
-        double startle = physics.isScruffDragging()
-            ? 1.0 - smoothstepD(0.0, 0.45, (double)physics.scruffHoldTime)
-            : smoothstepD(0.0, 1.0, 1.0 - (double)physics.scruffDropTimer / 0.16);
-        // Pendulum state (CatPhysics::stepDangle). dangle* angles are + toward canvas right; cairo rotations are
-        // + clockwise (a hanging vector swings left), hence the sign flips below.
-        double theta = std::clamp((double)physics.dangleAngle, -0.9, 0.9);
-        double thetaVel = std::clamp((double)physics.dangleAngVel, -8.0, 8.0);
-        double legRel = std::clamp((double)physics.dangleLeg - theta, -0.9, 0.9);
-        double tailRelA = std::clamp((double)physics.dangleTailA - theta, -1.2, 1.2);
-        double tailRelB = std::clamp((double)physics.dangleTailB - theta, -1.4, 1.4);
-        double swingY = std::clamp((double)physics.dangleStretch * 3.5, -0.92, 0.92);
-        double idleSway = std::sin((double)physics.time * 4.2) * 0.03 * (1.0 - startle);
-        double limbSwing = std::clamp(-legRel, -0.82, 0.82) + idleSway;
+        double startle = 0.0;
+        if (physics.isScruffDragging()) {
+            if (physics.scruffHoldTime < 0.14f) {
+                startle = 1.0;
+            } else {
+                startle = std::max(0.0, 1.0 - ((double)physics.scruffHoldTime - 0.14) / 0.08);
+            }
+        } else {
+            startle = (physics.scruffDropTimer > 0.01f) ? std::min(1.0, (double)physics.scruffDropTimer / 0.12) : 1.0;
+        }
+        // Lively 2D drag inertia: limbs, lower torso & tail trail behind fast motion and rebound softly!
+        double swingH = std::clamp((double)physics.scruffSwing.value, -1.0, 1.0);
+        double swingY = std::clamp((double)physics.scruffSwingY.value, -0.92, 0.92);
+        double tailSwing = std::clamp((double)physics.scruffTailSwing.value, -1.25, 1.25);
+        double idleSway = std::sin((double)physics.time * 4.2) * 0.045 * (1.0 - startle);
+        double limbSwing = std::clamp(swingH * 0.85, -0.82, 0.82) * (1.0 - startle * 0.45) + idleSway;
         double upBillow = std::max(0.0, -swingY);
 
         const SkinPalette& pal = skin.palette;
         const Build& bd = buildOf(skin);
         double hs = skin.shape.headScale;
         double bw = skin.shape.bodyWidth;
+        double nw = (double)skin.shape.neckWidth;
         bool isDazed = (skin.renderStyle == SkinRenderStyle::Dazed);
         bool isBlackRim = isClassicBlackRim(skin);
         RGBA limbInk = isBlackRim
@@ -4983,26 +4969,31 @@ public:
         double limbWScale = std::clamp(((double)bd.limbStartW / 19.0) * (1.0 + plump * 0.62), 0.72, 1.30);
         double limbLenScale = std::clamp(1.0 - plump * 0.28 + (isSleek ? 0.07 : 0.0), 0.84, 1.18);
 
-        double baseShiftX = (double)physics.bodyShiftX.value;
-        double liftY = -liftS * 8.0 + std::sin((double)physics.time * 3.8) * 1.8 * (1.0 - startle) + swingY * 5.0;
-        PtD H = { 192.0 + baseShiftX, lerpD(104.0, 112.0, startle) + liftY + (hs - 1.0) * 6.0 };
-        Pt headCenter = { (float)H.x, (float)H.y };
+        double baseShiftX = (double)physics.bodyShiftX.value + swingH * 10.0;
+        double liftY = -liftS * 12.0 + std::sin((double)physics.time * 3.8) * 2.0 * (1.0 - startle) + swingY * 5.0;
+        PtD headCenterD = {
+            180.0 + baseShiftX,
+            lerpD(94.0, 108.0, startle) + liftY + (hs - 1.0) * 6.0
+        };
+        Pt headCenter = { (float)headCenterD.x, (float)headCenterD.y };
 
         double cheekHalfW = (double)bd.cheekHalfW * (double)skin.shape.cheekFullness * hs;
         double crownY = (double)bd.crownBaseY * hs;
         double cheekY = (double)bd.cheekY * hs;
         double chinY = 33.0 * hs;
 
-        double scruffTuftH = lerpD(13.0, 9.0, startle) * hs;
-        PtD scruffPinch = { H.x - 35.0 * hs, H.y + crownY - scruffTuftH };
+        double scruffTuftH = lerpD(6.2, 3.8, startle) * hs;
+        PtD scruffPinch = { headCenterD.x, headCenterD.y + crownY - scruffTuftH };
 
-        double torsoLen = lerpD(124.0 - plump * 12.0 + (isSleek ? 10.0 : 0.0), 108.0 - plump * 10.0, startle) * (1.0 + swingY * 0.08);
-        double torsoBottomY = H.y + torsoLen;
-        double hipLagX = -28.0 + std::clamp(-thetaVel * 7.0, -18.0, 18.0) + idleSway * 12.0;  // rump trails the swing
-        double waistHalfW = (double)bd.waistCtrlW * bw * lerpD(0.84 + plump * 0.16, 0.90 + plump * 0.14, startle);
-        double hipHalfW = (double)bd.hipHalfW * bw * lerpD(0.88 + plump * 0.18, 0.94 + plump * 0.14, startle);
-        double bottomDip = 10.0 + std::max(0.0, plump) * 10.0;
-        double rumpCenterX = H.x + hipLagX;
+        double torsoLen = lerpD(124.0 - plump * 18.0 + (isSleek ? 10.0 : 0.0), 104.0 - plump * 12.0, startle) * (1.0 + swingY * 0.08);
+        double torsoBottomY = headCenterD.y + torsoLen;
+        double hipLagX = (swingH * 22.0 + idleSway * 16.0) * (1.0 - startle * 0.35);
+
+        double neckHalfW = std::max(18.0 * hs, (cheekHalfW - (double)bd.neckPinchX * hs) * nw);
+        double waistHalfW = (double)bd.waistCtrlW * bw * lerpD(0.84 + plump * 0.24, 0.92 + plump * 0.20, startle);
+        double hipHalfW = (double)bd.hipHalfW * bw * lerpD(0.95 + plump * 0.26, 1.00 + plump * 0.20, startle);
+        double bottomDip = 12.0 + std::max(0.0, plump) * 14.0;
+        double rumpCenterX = headCenterD.x + hipLagX;
 
         auto rot = [](PtD pt, PtD pivot, double angle) -> PtD {
             double dx = pt.x - pivot.x, dy = pt.y - pivot.y;
@@ -5011,100 +5002,77 @@ public:
         };
 
         auto traceLongCatSilhouette = [&]() {
-            double rCheekX = H.x + cheekHalfW, lCheekX = H.x - cheekHalfW, cheekPosY = H.y + cheekY;
-            PtD throatPt = { H.x + cheekHalfW * 0.44, H.y + chinY - 1.5 * hs };
-            double waistY = H.y + torsoLen * 0.50;
+            double tuftBaseX = std::min(12.5 * hs, cheekHalfW * 0.31);
+            double rCheekX = headCenterD.x + cheekHalfW;
+            double lCheekX = headCenterD.x - cheekHalfW;
+            double cheekPosY = headCenterD.y + cheekY;
+            double neckCtrlY = headCenterD.y + (double)bd.neckCtrlY * hs;
+            double waistY = headCenterD.y + torsoLen * 0.48;
             double hipY = torsoBottomY - 14.0;
-            double waistCenterX = H.x + hipLagX * 0.56;
-            double botHalf = hipHalfW * 0.58;
-            double midBackX = waistCenterX - waistHalfW * 1.06;
-            cairo_new_path(cr);
-            cairo_move_to(cr, H.x, H.y + crownY);
-            cairo_curve_to(cr, H.x + (double)bd.crownCtrlW * hs, H.y + crownY, rCheekX + 1.5 * hs, H.y + (double)bd.cheekCtrlTopY * hs, rCheekX, cheekPosY);
-            cairo_curve_to(cr, rCheekX - 1.0 * hs, cheekPosY + 15.0 * hs, throatPt.x + 12.0 * hs, throatPt.y - 4.0 * hs, throatPt.x, throatPt.y);
-            cairo_curve_to(cr, throatPt.x - 9.0 * hs, throatPt.y + 3.0 * hs, waistCenterX + waistHalfW * 1.04, waistY - 2.0, rumpCenterX + hipHalfW, hipY);
-            cairo_curve_to(cr, rumpCenterX + hipHalfW * 0.94, torsoBottomY + bottomDip * 0.58, rumpCenterX + botHalf, torsoBottomY + bottomDip, rumpCenterX, torsoBottomY + bottomDip);
-            cairo_curve_to(cr, rumpCenterX - botHalf, torsoBottomY + bottomDip, rumpCenterX - hipHalfW * 0.94, torsoBottomY + bottomDip * 0.58, rumpCenterX - hipHalfW, hipY);
-            // The back rises in one smooth line straight up into the pinched nape skin (the hand is the top of the
-            // back), then the skin tent eases back down onto the crown behind the left ear.
-            (void)midBackX; (void)lCheekX;
-            PtD pinchL = { scruffPinch.x - 5.0 * hs, scruffPinch.y + 2.5 * hs };
-            PtD pinchR = { scruffPinch.x + 5.0 * hs, scruffPinch.y + 2.5 * hs };
-            cairo_curve_to(cr, rumpCenterX - hipHalfW * 1.10, waistY + 6.0,
-                           pinchL.x - 26.0 * hs + hipLagX * 0.25, pinchL.y + 46.0 * hs,
-                           pinchL.x, pinchL.y);
-            quadCurveTo(cr, pinchL.x, pinchL.y, scruffPinch.x, scruffPinch.y - 2.5 * hs, pinchR.x, pinchR.y);
-            cairo_curve_to(cr, pinchR.x + 4.0 * hs, pinchR.y + 3.0 * hs, H.x - (double)bd.crownCtrlW * hs * 0.85, H.y + crownY - 0.5 * hs, H.x, H.y + crownY);
-            cairo_close_path(cr);
-        };
+            double waistCenterX = headCenterD.x + hipLagX * 0.34;
+            double botHalf = hipHalfW * 0.62;
 
-        // Head disc alone (same crown/cheek/chin curves as the silhouette): repainted over the ears so the left ear
-        // stands in front of the pinched nape skin but behind the head, exactly like the seated pose.
-        auto traceHeadOnly = [&]() {
-            double rCheekX = H.x + cheekHalfW, lCheekX = H.x - cheekHalfW, cheekPosY = H.y + cheekY;
             cairo_new_path(cr);
-            cairo_move_to(cr, H.x, H.y + crownY);
-            cairo_curve_to(cr, H.x + (double)bd.crownCtrlW * hs, H.y + crownY, rCheekX + 1.5 * hs, H.y + (double)bd.cheekCtrlTopY * hs, rCheekX, cheekPosY);
-            cairo_curve_to(cr, rCheekX - 0.5 * hs, cheekPosY + 19.0 * hs, H.x + cheekHalfW * 0.56, H.y + chinY, H.x, H.y + chinY);
-            cairo_curve_to(cr, H.x - cheekHalfW * 0.56, H.y + chinY, lCheekX + 0.5 * hs, cheekPosY + 19.0 * hs, lCheekX, cheekPosY);
-            cairo_curve_to(cr, lCheekX - 1.5 * hs, H.y + (double)bd.cheekCtrlTopY * hs, H.x - (double)bd.crownCtrlW * hs, H.y + crownY, H.x, H.y + crownY);
+            cairo_move_to(cr, scruffPinch.x, scruffPinch.y);
+            cairo_curve_to(cr, headCenterD.x + tuftBaseX * 0.56, scruffPinch.y + scruffTuftH * 0.06,
+                           headCenterD.x + tuftBaseX * 0.80, headCenterD.y + crownY - scruffTuftH * 0.14,
+                           headCenterD.x + tuftBaseX, headCenterD.y + crownY + 0.5 * hs);
+            cairo_curve_to(cr, headCenterD.x + (double)bd.crownCtrlW * hs, headCenterD.y + crownY,
+                           rCheekX + 1.5 * hs, headCenterD.y + (double)bd.cheekCtrlTopY * hs,
+                           rCheekX, cheekPosY);
+            cairo_curve_to(cr, headCenterD.x + neckHalfW, neckCtrlY,
+                           waistCenterX + waistHalfW, waistY,
+                           rumpCenterX + hipHalfW, hipY);
+            cairo_curve_to(cr, rumpCenterX + hipHalfW * 0.96, torsoBottomY + bottomDip * 0.55,
+                           rumpCenterX + botHalf, torsoBottomY + bottomDip,
+                           rumpCenterX, torsoBottomY + bottomDip);
+            cairo_curve_to(cr, rumpCenterX - botHalf, torsoBottomY + bottomDip,
+                           rumpCenterX - hipHalfW * 0.96, torsoBottomY + bottomDip * 0.55,
+                           rumpCenterX - hipHalfW, hipY);
+            cairo_curve_to(cr, waistCenterX - waistHalfW, waistY,
+                           headCenterD.x - neckHalfW, neckCtrlY,
+                           lCheekX, cheekPosY);
+            cairo_curve_to(cr, lCheekX - 1.5 * hs, headCenterD.y + (double)bd.cheekCtrlTopY * hs,
+                           headCenterD.x - (double)bd.crownCtrlW * hs, headCenterD.y + crownY,
+                           headCenterD.x - tuftBaseX, headCenterD.y + crownY + 0.5 * hs);
+            cairo_curve_to(cr, headCenterD.x - tuftBaseX * 0.80, headCenterD.y + crownY - scruffTuftH * 0.14,
+                           headCenterD.x - tuftBaseX * 0.56, scruffPinch.y + scruffTuftH * 0.06,
+                           scruffPinch.x, scruffPinch.y);
             cairo_close_path(cr);
-        };
-        // Left half of the head rim (crown -> left cheek -> under the chin): the edge that reads against the back.
-        auto traceHeadLeftRim = [&]() {
-            double lCheekX = H.x - cheekHalfW, cheekPosY = H.y + cheekY;
-            cairo_new_path(cr);
-            cairo_move_to(cr, H.x - cheekHalfW * 0.30, H.y + chinY - 1.0 * hs);
-            cairo_curve_to(cr, H.x - cheekHalfW * 0.62, H.y + chinY - 1.5 * hs, lCheekX + 0.5 * hs, cheekPosY + 19.0 * hs, lCheekX, cheekPosY);
-            cairo_curve_to(cr, lCheekX - 1.5 * hs, H.y + (double)bd.cheekCtrlTopY * hs, H.x - (double)bd.crownCtrlW * hs, H.y + crownY, H.x, H.y + crownY);
         };
 
         auto dragBodyMap = [&](SkinPoint pt) -> Pt {
-            double jawBodyY = -102.0 + 34.0 * hs;
-            double torsoSpan = std::max(1.0, 12.0 - jawBodyY);
-            double dragTopY = H.y + chinY - 2.0 * hs;
-            double dragBotY = torsoBottomY + bottomDip * 0.60;
-            double u;
-            if ((double)pt.y <= jawBodyY) {
-                double headU = ((double)pt.y + 102.0) / std::max(1.0, 34.0 * hs);
-                u = (headU - 1.0) * 0.22;
-            } else {
-                double rawU = ((double)pt.y - jawBodyY) / torsoSpan;
-                u = rawU <= 1.0 ? rawU : (1.0 + (rawU - 1.0) * 0.35);
-            }
-            double uC = std::clamp(u, 0.0, 1.05);
-            double mappedY = dragTopY + u * (dragBotY - dragTopY);
-            double midX = lerpD(H.x, rumpCenterX, smoothstepD(0.0, 0.92, uC)) - 4.0 * std::sin(PI * std::min(1.0, uC));
+            double u = ((double)pt.y + 98.0) / 110.0;
+            double uC = std::clamp(u, 0.0, 1.15);
+            double ySpan = (torsoBottomY + bottomDip * 0.78) - headCenterD.y;
+            double mappedY = headCenterD.y + u * ySpan;
             double baseRefW = std::max(1.0, (double)bd.hipHalfW * bw);
-            double envW = lerpD(waistHalfW * 0.92, hipHalfW * 0.92, smoothstepD(0.25, 0.92, uC));
-            double xScale = (envW / baseRefW) * bw;
-            return { (float)(midX + (double)pt.x * xScale), (float)mappedY };
-        };
-        auto jawStaticSide = [&](bool headSide) {
-            tracePolyline(cr, skinJawSide(headSide, skin.shape.cheekFullness),
-                          [&](SkinPoint p) { return Pt{ (float)(H.x + (double)p.x * hs), (float)(H.y + (double)p.y * hs) }; });
-            cairo_close_path(cr);
+            double targetW = lerpD(waistHalfW / std::max(1.0, (double)bd.waistCtrlW * bw), hipHalfW / baseRefW, smoothstepD(0.35, 0.95, uC));
+            double wScale = lerpD(1.0, targetW, smoothstepD(0.18, 0.55, uC));
+            double swayX = hipLagX * uC * uC;
+            return { (float)(headCenterD.x + (double)pt.x * bw * wScale + swayX), (float)mappedY };
         };
 
-        // Tail
-        PtD tailRoot = { rumpCenterX - hipHalfW * 0.72, torsoBottomY - 18.0 };
-        double tailLen = 82.0 * (double)skin.shape.tailLength * (1.0 + swingY * 0.14);
-        double tailW = std::max(8.0, isDazed ? 13.0 : (double)bd.tailWidth * (double)skin.shape.tailThickness);
-        double tailAngA = std::clamp(-tailRelA + idleSway * 1.2, -0.95, 0.95);
-        double tailAngB = std::clamp(-tailRelB + idleSway * 1.5, -1.1, 1.1);
-        PtD baseC1  = { tailRoot.x - 18.0 - upBillow * 10.0, tailRoot.y + tailLen * 0.30 - upBillow * 8.0 };
-        PtD baseC2  = { tailRoot.x - 16.0 - upBillow * 14.0, tailRoot.y + tailLen * 0.72 - upBillow * 20.0 };
-        PtD baseTip = { tailRoot.x - 2.0 - upBillow * 18.0, tailRoot.y + tailLen - upBillow * 30.0 };
-        PtD tailC1  = rot(baseC1,  tailRoot, tailAngA * 0.70);
-        PtD tailC2  = rot(baseC2,  tailRoot, lerpD(tailAngA, tailAngB, 0.6));
-        PtD tailTip = rot(baseTip, tailRoot, tailAngB * 1.10);
+        // 2. Dangling limp tail emerging from lower-right behind the hip
+        PtD tailPivot = { rumpCenterX + hipHalfW * 0.60, torsoBottomY - 16.0 };
+        double tailLen = 76.0 * (double)skin.shape.tailLength * (1.0 + swingY * 0.14);
+        double tailW = std::max(8.0, (isDazed ? 13.0 : (double)bd.tailWidth * (double)skin.shape.tailThickness) * 1.08);
+        double rawTailAng = (tailSwing * (1.0 - startle * 0.25) + idleSway * 1.5) * 0.85;
+        double tailAng = std::clamp(rawTailAng, -1.05, 0.75);
+        PtD tailRoot = tailPivot;
+        PtD baseC1  = { tailPivot.x + 26.0 + upBillow * 10.0, tailPivot.y + tailLen * 0.22 - upBillow * 10.0 };
+        PtD baseC2  = { tailPivot.x + 36.0 + upBillow * 18.0, tailPivot.y + tailLen * 0.64 - upBillow * 26.0 };
+        PtD baseTip = { tailPivot.x + 24.0 + upBillow * 24.0, tailPivot.y + tailLen - upBillow * 40.0 };
+        PtD tailC1  = rot(baseC1,  tailPivot, tailAng * 0.45);
+        PtD tailC2  = rot(baseC2,  tailPivot, tailAng * 0.92);
+        PtD tailTip = rot(baseTip, tailPivot, tailAng * 1.26);
         auto traceTailCurve = [&]() {
             cairo_new_path(cr);
             cairo_move_to(cr, tailRoot.x, tailRoot.y);
             cairo_curve_to(cr, tailC1.x, tailC1.y, tailC2.x, tailC2.y, tailTip.x, tailTip.y);
         };
 
-        // Limbs
+        // 3. Four symmetric front-facing dangling limbs
         struct DragLimb {
             PtD root, tip;
             double startW, endW, bendX;
@@ -5113,102 +5081,118 @@ public:
         };
         auto makeLimb = [&](PtD rootA, PtD tipA, PtD rootB, PtD tipB, double w0, double w1, double bendX, double swingScale, double splayDir, int armDir, bool isBehindBody) -> DragLimb {
             PtD r = lerpPtD(rootA, rootB, startle);
-            PtD baseTipL = lerpPtD(tipA, tipB, startle);
+            PtD baseTip = lerpPtD(tipA, tipB, startle);
             double lenFactor = (1.0 + swingY * 0.16) * limbLenScale;
-            PtD stretched = { r.x + (baseTipL.x - r.x) * lenFactor, r.y + (baseTipL.y - r.y) * lenFactor - upBillow * 6.0 };
-            double ang = limbSwing * (0.55 + swingScale * 0.6) + upBillow * 0.20 * splayDir;
+            PtD stretched = {
+                r.x + (baseTip.x - r.x) * lenFactor,
+                r.y + (baseTip.y - r.y) * lenFactor - upBillow * 6.0
+            };
+            double ang = limbSwing * swingScale + upBillow * 0.20 * splayDir;
             PtD t = rot(stretched, r, ang);
             double dynBendX = bendX + limbSwing * 11.0 * swingScale;
             return { r, t, w0 * limbWScale, w1 * limbWScale, dynBendX, armDir, isBehindBody };
         };
-        double deskSpread = pureLift ? 0.0 : carry;
-        double shoulderY = H.y + 38.0 * hs;
-        double armLen = 58.0;
+
+        double shoulderY = headCenterD.y + 42.0 * hs;
+        // Tuck front-arm roots cleanly INSIDE the torso silhouette so shoulders NEVER bulge outside the body!
+        double shoulderInX = std::max(12.0 * hs, std::min(neckHalfW * 0.72, waistHalfW * 0.56));
+        double armLen = 56.0;
         DragLimb frontLeftLimb = makeLimb(
-            { H.x - 28.0 * hs + hipLagX * 0.12, shoulderY + 4.0 },
-            { H.x - 20.0 * hs - deskSpread * 18.0 + hipLagX * 0.08, shoulderY + armLen + 4.0 },
-            { H.x - 28.0 * hs + hipLagX * 0.10, shoulderY + 6.0 },
-            { H.x - 22.0 * hs - deskSpread * 18.0 + hipLagX * 0.06, shoulderY + armLen * 0.86 + 4.0 },
-            14.5, 12.8, 7.0, 0.42, -0.45, -1, false);
+            { headCenterD.x - shoulderInX + hipLagX * 0.16, shoulderY },
+            { headCenterD.x - shoulderInX + 1.5 + hipLagX * 0.30, shoulderY + armLen },
+            { headCenterD.x - shoulderInX + hipLagX * 0.12, shoulderY + 3.0 },
+            { headCenterD.x - shoulderInX - 4.0 + hipLagX * 0.22, shoulderY + armLen * 0.84 },
+            13.6, 12.4, -1.5, 0.42, -0.65, -1, false
+        );
         DragLimb frontRightLimb = makeLimb(
-            { H.x + 2.0 * hs + hipLagX * 0.14, shoulderY + 4.0 },
-            { H.x + 12.0 * hs + deskSpread * 14.0 + hipLagX * 0.08, shoulderY + armLen - 2.0 },
-            { H.x + 2.0 * hs + hipLagX * 0.12, shoulderY + 6.0 },
-            { H.x + 11.0 * hs + deskSpread * 14.0 + hipLagX * 0.06, shoulderY + armLen * 0.86 - 2.0 },
-            14.5, 12.8, 7.5, 0.42, 0.45, 1, false);
-        double hindRootX = std::max(13.0, hipHalfW * 0.44);
-        double hindRootY = torsoBottomY + bottomDip * 0.12 - 14.0;
+            { headCenterD.x + shoulderInX + hipLagX * 0.16, shoulderY },
+            { headCenterD.x + shoulderInX - 1.5 + hipLagX * 0.30, shoulderY + armLen },
+            { headCenterD.x + shoulderInX + hipLagX * 0.12, shoulderY + 3.0 },
+            { headCenterD.x + shoulderInX + 4.0 + hipLagX * 0.22, shoulderY + armLen * 0.84 },
+            13.6, 12.4, 1.5, 0.42, 0.65, 1, false
+        );
+
+        double hindRootX = std::max(13.0, hipHalfW * 0.42);
+        double hindRootY = torsoBottomY + bottomDip * 0.20 - 12.0;
         double hindLen = 46.0;
         DragLimb backLeftLimb = makeLimb(
-            { rumpCenterX - hindRootX + 2.0, hindRootY }, { rumpCenterX - hindRootX + 12.0, hindRootY + hindLen },
-            { rumpCenterX - hindRootX + 1.0, hindRootY - 3.0 }, { rumpCenterX - hindRootX + 8.0, hindRootY + hindLen * 0.84 },
-            15.0, 12.4, 7.5, 0.68, -0.45, 0, true);
+            { rumpCenterX - hindRootX, hindRootY },
+            { rumpCenterX - hindRootX - 2.5, hindRootY + hindLen },
+            { rumpCenterX - hindRootX - 1.0, hindRootY - 3.0 },
+            { rumpCenterX - hindRootX - 7.5, hindRootY + hindLen * 0.80 },
+            15.2, 12.8, -1.5, 0.68, -0.65, 0, true
+        );
         DragLimb backRightLimb = makeLimb(
-            { rumpCenterX + hindRootX - 4.0, hindRootY - 2.0 }, { rumpCenterX + hindRootX + 10.0, hindRootY + hindLen - 4.0 },
-            { rumpCenterX + hindRootX - 4.0, hindRootY - 4.0 }, { rumpCenterX + hindRootX + 11.0, hindRootY + hindLen * 0.82 },
-            15.0, 12.4, 8.5, 0.68, 0.45, 0, true);
+            { rumpCenterX + hindRootX, hindRootY },
+            { rumpCenterX + hindRootX + 2.5, hindRootY + hindLen },
+            { rumpCenterX + hindRootX + 1.0, hindRootY - 3.0 },
+            { rumpCenterX + hindRootX + 7.5, hindRootY + hindLen * 0.80 },
+            15.2, 12.8, 1.5, 0.68, 0.65, 0, true
+        );
 
         struct LimbGeoD {
-            double ux, uy, nx, ny, r0, r1;
-            PtD p0L, p0R, p1L, p1R, midL, midR, pawC1, pawC2;
+            PtD p0L, p0R, p1L, p1R, midL, midR;
+            double r1;
         };
         auto limbGeo = [&](const DragLimb& limb) -> LimbGeoD {
             double dx = limb.tip.x - limb.root.x, dy = limb.tip.y - limb.root.y;
             double len = std::max(1.0, std::hypot(dx, dy));
-            double ux = dx / len, uy = dy / len, nx = -uy, ny = ux;
+            double ux = dx / len, uy = dy / len;
+            double nx = -uy, ny = ux;
             double r0 = limb.startW * 0.5, r1 = limb.endW * 0.5;
             PtD p0L = { limb.root.x + nx * r0, limb.root.y + ny * r0 };
             PtD p0R = { limb.root.x - nx * r0, limb.root.y - ny * r0 };
-            PtD p1L = { limb.tip.x + nx * r1, limb.tip.y + ny * r1 };
-            PtD p1R = { limb.tip.x - nx * r1, limb.tip.y - ny * r1 };
+            PtD p1L = { limb.tip.x + nx * r1,  limb.tip.y + ny * r1 };
+            PtD p1R = { limb.tip.x - nx * r1,  limb.tip.y - ny * r1 };
             PtD midL = { (p0L.x + p1L.x) * 0.5 + limb.bendX * 0.5 + nx * 1.2, (p0L.y + p1L.y) * 0.5 + ny * 1.2 };
             PtD midR = { (p0R.x + p1R.x) * 0.5 + limb.bendX * 0.5 - nx * 1.2, (p0R.y + p1R.y) * 0.5 - ny * 1.2 };
-            PtD pawC1 = { p1L.x + ux * r1 * 1.25, p1L.y + uy * r1 * 1.25 };
-            PtD pawC2 = { p1R.x + ux * r1 * 1.25, p1R.y + uy * r1 * 1.25 };
-            return { ux, uy, nx, ny, r0, r1, p0L, p0R, p1L, p1R, midL, midR, pawC1, pawC2 };
+            return { p0L, p0R, p1L, p1R, midL, midR, r1 };
         };
-        // mode: 0 = rim (open), 1 = fill (closed), 2 = trimmed ink contour
+
+        // mode: 0 = rim (open), 1 = fill (closed with rounded shoulder socket), 2 = trimmed inner ink contour
         auto traceLimbPath = [&](const DragLimb& limb, int mode) {
-            LimbGeoD g = limbGeo(limb);
+            double dx = limb.tip.x - limb.root.x, dy = limb.tip.y - limb.root.y;
+            double len = std::max(1.0, std::hypot(dx, dy));
+            double ux = dx / len, uy = dy / len;
+            double nx = -uy, ny = ux;
+            double r0 = limb.startW * 0.5, r1 = limb.endW * 0.5;
+            PtD p0L = { limb.root.x + nx * r0, limb.root.y + ny * r0 };
+            PtD p0R = { limb.root.x - nx * r0, limb.root.y - ny * r0 };
+            PtD p1L = { limb.tip.x + nx * r1,  limb.tip.y + ny * r1 };
+            PtD p1R = { limb.tip.x - nx * r1,  limb.tip.y - ny * r1 };
+            PtD midL = { (p0L.x + p1L.x) * 0.5 + limb.bendX * 0.5 + nx * 1.2, (p0L.y + p1L.y) * 0.5 + ny * 1.2 };
+            PtD midR = { (p0R.x + p1R.x) * 0.5 + limb.bendX * 0.5 - nx * 1.2, (p0R.y + p1R.y) * 0.5 - ny * 1.2 };
+
             cairo_new_path(cr);
             if (mode == 2) {
                 constexpr double t0 = 0.24, omt = 1.0 - t0;
-                PtD s0L = { omt * omt * g.p0L.x + 2.0 * omt * t0 * g.midL.x + t0 * t0 * g.p1L.x,
-                            omt * omt * g.p0L.y + 2.0 * omt * t0 * g.midL.y + t0 * t0 * g.p1L.y };
-                PtD scL = { omt * g.midL.x + t0 * g.p1L.x, omt * g.midL.y + t0 * g.p1L.y };
-                PtD s0R = { omt * omt * g.p0R.x + 2.0 * omt * t0 * g.midR.x + t0 * t0 * g.p1R.x,
-                            omt * omt * g.p0R.y + 2.0 * omt * t0 * g.midR.y + t0 * t0 * g.p1R.y };
-                PtD scR = { omt * g.midR.x + t0 * g.p1R.x, omt * g.midR.y + t0 * g.p1R.y };
+                PtD s0L = { omt * omt * p0L.x + 2.0 * omt * t0 * midL.x + t0 * t0 * p1L.x,
+                            omt * omt * p0L.y + 2.0f * omt * t0 * midL.y + t0 * t0 * p1L.y };
+                PtD scL = { omt * midL.x + t0 * p1L.x, omt * midL.y + t0 * p1L.y };
+                PtD s0R = { omt * omt * p0R.x + 2.0 * omt * t0 * midR.x + t0 * t0 * p1R.x,
+                            omt * omt * p0R.y + 2.0 * omt * t0 * midR.y + t0 * t0 * p1R.y };
+                PtD scR = { omt * midR.x + t0 * p1R.x, omt * midR.y + t0 * p1R.y };
                 cairo_move_to(cr, s0L.x, s0L.y);
-                quadCurveTo(cr, s0L.x, s0L.y, scL.x, scL.y, g.p1L.x, g.p1L.y);
-                cairo_curve_to(cr, g.pawC1.x, g.pawC1.y, g.pawC2.x, g.pawC2.y, g.p1R.x, g.p1R.y);
-                quadCurveTo(cr, g.p1R.x, g.p1R.y, scR.x, scR.y, s0R.x, s0R.y);
+                quadCurveTo(cr, s0L.x, s0L.y, scL.x, scL.y, p1L.x, p1L.y);
+                cairo_curve_to(cr, p1L.x + ux * r1 * 1.25, p1L.y + uy * r1 * 1.25,
+                               p1R.x + ux * r1 * 1.25, p1R.y + uy * r1 * 1.25,
+                               p1R.x, p1R.y);
+                quadCurveTo(cr, p1R.x, p1R.y, scR.x, scR.y, s0R.x, s0R.y);
                 return;
             }
-            cairo_move_to(cr, g.p0L.x, g.p0L.y);
-            quadCurveTo(cr, g.p0L.x, g.p0L.y, g.midL.x, g.midL.y, g.p1L.x, g.p1L.y);
-            cairo_curve_to(cr, g.pawC1.x, g.pawC1.y, g.pawC2.x, g.pawC2.y, g.p1R.x, g.p1R.y);
-            quadCurveTo(cr, g.p1R.x, g.p1R.y, g.midR.x, g.midR.y, g.p0R.x, g.p0R.y);
+            cairo_move_to(cr, p0L.x, p0L.y);
+            quadCurveTo(cr, p0L.x, p0L.y, midL.x, midL.y, p1L.x, p1L.y);
+            cairo_curve_to(cr, p1L.x + ux * r1 * 1.25, p1L.y + uy * r1 * 1.25,
+                           p1R.x + ux * r1 * 1.25, p1R.y + uy * r1 * 1.25,
+                           p1R.x, p1R.y);
+            quadCurveTo(cr, p1R.x, p1R.y, midR.x, midR.y, p0R.x, p0R.y);
             if (mode == 1) {
-                cairo_curve_to(cr, g.p0R.x - g.ux * g.r0 * 0.40, g.p0R.y - g.uy * g.r0 * 0.40,
-                               g.p0L.x - g.ux * g.r0 * 0.40, g.p0L.y - g.uy * g.r0 * 0.40, g.p0L.x, g.p0L.y);
+                cairo_curve_to(cr, p0R.x - ux * r0 * 0.85, p0R.y - uy * r0 * 0.85,
+                               p0L.x - ux * r0 * 0.85, p0L.y - uy * r0 * 0.85,
+                               p0L.x, p0L.y);
                 cairo_close_path(cr);
             }
         };
-        auto paintLinear = [&](PtD a, PtD b, std::initializer_list<std::pair<double, RGBA>> stops, bool padStart, bool padEnd) {
-            // CGGradient semantics: outside [first,last] stop only painted when the matching draws*Location flag is set.
-            cairo_pattern_t* g = cairo_pattern_create_linear(a.x, a.y, b.x, b.y);
-            double first = stops.begin()->first, last = (stops.end() - 1)->first;
-            RGBA c0 = stops.begin()->second, c1 = (stops.end() - 1)->second;
-            if (!padStart && first > 0.0) { cairo_pattern_add_color_stop_rgba(g, 0.0, c0.r, c0.g, c0.b, 0.0); cairo_pattern_add_color_stop_rgba(g, first - 1e-4, c0.r, c0.g, c0.b, 0.0); }
-            for (auto& st : stops) cairo_pattern_add_color_stop_rgba(g, st.first, st.second.r, st.second.g, st.second.b, st.second.a);
-            if (!padEnd && last < 1.0) { cairo_pattern_add_color_stop_rgba(g, last + 1e-4, c1.r, c1.g, c1.b, 0.0); cairo_pattern_add_color_stop_rgba(g, 1.0, c1.r, c1.g, c1.b, 0.0); }
-            cairo_pattern_set_extend(g, padEnd || padStart ? CAIRO_EXTEND_PAD : CAIRO_EXTEND_NONE);
-            cairo_set_source(cr, g);
-            cairo_paint(cr);
-            cairo_pattern_destroy(g);
-        };
-        auto rgbaOf = [](const SkinColor& c, double a = -1.0) -> RGBA { return { c.r, c.g, c.b, a < 0.0 ? c.a : a }; };
 
         auto drawDragLimb = [&](const DragLimb& limb) {
             LimbGeoD geo = limbGeo(limb);
@@ -5216,68 +5200,113 @@ public:
                 std::vector<Pt> leftEdge, rightEdge;
                 for (int i = 0; i <= 8; ++i) {
                     double t = (double)i / 8.0, omt = 1.0 - t;
-                    leftEdge.push_back({ (float)(omt * omt * geo.p0L.x + 2.0 * omt * t * geo.midL.x + t * t * geo.p1L.x),
-                                         (float)(omt * omt * geo.p0L.y + 2.0 * omt * t * geo.midL.y + t * t * geo.p1L.y) });
-                    rightEdge.push_back({ (float)(omt * omt * geo.p0R.x + 2.0 * omt * t * geo.midR.x + t * t * geo.p1R.x),
-                                          (float)(omt * omt * geo.p0R.y + 2.0 * omt * t * geo.midR.y + t * t * geo.p1R.y) });
+                    leftEdge.push_back({
+                        (float)(omt * omt * geo.p0L.x + 2.0 * omt * t * geo.midL.x + t * t * geo.p1L.x),
+                        (float)(omt * omt * geo.p0L.y + 2.0 * omt * t * geo.midL.y + t * t * geo.p1L.y)
+                    });
+                    rightEdge.push_back({
+                        (float)(omt * omt * geo.p0R.x + 2.0 * omt * t * geo.midR.x + t * t * geo.p1R.x),
+                        (float)(omt * omt * geo.p0R.y + 2.0 * omt * t * geo.midR.y + t * t * geo.p1R.y)
+                    });
                 }
                 drawDazedArm(cr, [&]() { traceLimbPath(limb, 1); }, leftEdge, rightEdge,
                              limb.tip.x - geo.r1, limb.tip.y - geo.r1 * 0.4, geo.r1 * 2.0, geo.r1 * 1.8);
                 return;
             }
+
             cairo_save(cr);
             traceLimbPath(limb, 1);
             cairo_clip(cr);
             SkinSpace limbSpace = (limb.armDir < 0) ? SkinSpace::LeftArm : ((limb.armDir > 0) ? SkinSpace::RightArm : SkinSpace::HindLeg);
             const char* limbKey = (limb.armDir < 0) ? "leftArm" : ((limb.armDir > 0) ? "rightArm" : "hindLeg");
-            auto pgIt = skin.partGradients.find(limbKey);
             if (isDazed) {
-                paintLinear(limb.root, limb.tip, { {0.0, {227.0/255, 201.0/255, 159.0/255, 1}}, {1.0, {200.0/255, 167.0/255, 122.0/255, 1}} }, true, true);
+                cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
+                cairo_pattern_add_color_stop_rgba(grad, 0.0, 227.0/255.0, 201.0/255.0, 159.0/255.0, 1.0);
+                cairo_pattern_add_color_stop_rgba(grad, 1.0, 200.0/255.0, 167.0/255.0, 122.0/255.0, 1.0);
+                cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                cairo_set_source(cr, grad);
+                cairo_paint(cr);
+                cairo_pattern_destroy(grad);
             } else if (skin.colorpoint()) {
+                cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
                 const SkinColor& midC = pal.pointsMid.set ? pal.pointsMid : pal.legs;
                 const SkinColor& pointC = pal.points.set ? pal.points : pal.paws;
+                cairo_pattern_add_color_stop_rgba(grad, 0.0,  pal.body.r, pal.body.g, pal.body.b, 0.0);
+                cairo_pattern_add_color_stop_rgba(grad, 0.16, pal.body.r, pal.body.g, pal.body.b, pal.body.a);
                 if (pointC.sameAs(pal.paws)) {
-                    paintLinear(limb.root, limb.tip, { {0.0, rgbaOf(pal.body, 0.0)}, {0.16, rgbaOf(pal.body)}, {0.48, rgbaOf(midC)}, {0.78, rgbaOf(pal.paws)} }, false, true);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.48, midC.r,     midC.g,     midC.b,     midC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.78, pal.paws.r, pal.paws.g, pal.paws.b, pal.paws.a);
                 } else {
-                    paintLinear(limb.root, limb.tip, { {0.0, rgbaOf(pal.body, 0.0)}, {0.16, rgbaOf(pal.body)}, {0.46, rgbaOf(midC)}, {0.72, rgbaOf(pointC)}, {0.88, rgbaOf(pal.paws)} }, false, true);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.46, midC.r,     midC.g,     midC.b,     midC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.72, pointC.r,   pointC.g,   pointC.b,   pointC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.88, pal.paws.r, pal.paws.g, pal.paws.b, pal.paws.a);
                 }
-            } else if (limb.armDir != 0 && pgIt != skin.partGradients.end()) {
+                cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                cairo_set_source(cr, grad);
+                cairo_paint(cr);
+                cairo_pattern_destroy(grad);
+            } else if (auto pgIt = skin.partGradients.find(limbKey); pgIt != skin.partGradients.end()) {
                 paintClampedPartGradient(cr, pgIt->second, limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
             } else if (!limb.isBehindBody) {
-                if (skin.idleLegsTinted) {
-                    paintLinear(limb.root, limb.tip, { {0.04, rgbaOf(pal.legs, 0.0)}, {0.32, rgbaOf(pal.legs)}, {1.0, rgbaOf(pal.legs)} }, false, true);
+                const SkinColor& legC = pal.legs;
+                const SkinColor& pawC = pal.paws;
+                if (pal.belly.set && !pal.belly.sameAs(legC)) {
+                    cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.0,  pal.belly.r, pal.belly.g, pal.belly.b, pal.belly.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.30, legC.r,      legC.g,      legC.b,      legC.a);
+                    if (!pawC.sameAs(legC)) {
+                        cairo_pattern_add_color_stop_rgba(grad, 0.68, legC.r, legC.g, legC.b, legC.a);
+                        cairo_pattern_add_color_stop_rgba(grad, 0.84, pawC.r, pawC.g, pawC.b, pawC.a);
+                    }
+                    cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                    cairo_set_source(cr, grad);
+                    cairo_paint(cr);
+                    cairo_pattern_destroy(grad);
+                } else if (!pawC.sameAs(legC)) {
+                    cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.0,  legC.r, legC.g, legC.b, legC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.68, legC.r, legC.g, legC.b, legC.a);
+                    cairo_pattern_add_color_stop_rgba(grad, 0.84, pawC.r, pawC.g, pawC.b, pawC.a);
+                    cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                    cairo_set_source(cr, grad);
+                    cairo_paint(cr);
+                    cairo_pattern_destroy(grad);
                 } else {
-                    setCol(cr, pal.belly.set ? pal.belly : pal.body);
+                    setCol(cr, legC);
                     cairo_paint(cr);
                 }
-            } else if (pgIt != skin.partGradients.end()) {
-                paintClampedPartGradient(cr, pgIt->second, limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
             } else {
-                const SkinColor& legC = pal.hindLeg.set ? pal.hindLeg : pal.legs;
-                const SkinColor& pawC = pal.hindPaw.set ? pal.hindPaw : pal.paws;
-                paintLinear(limb.root, limb.tip, { {0.22, rgbaOf(legC)}, {0.75, rgbaOf(pawC)} }, true, true);
+                cairo_pattern_t* grad = cairo_pattern_create_linear(limb.root.x, limb.root.y, limb.tip.x, limb.tip.y);
+                const SkinColor& legC = limb.isBehindBody && pal.hindLeg.set ? pal.hindLeg : pal.legs;
+                const SkinColor& pawC = limb.isBehindBody && pal.hindPaw.set ? pal.hindPaw : pal.paws;
+                cairo_pattern_add_color_stop_rgba(grad, 0.22, legC.r, legC.g, legC.b, legC.a);
+                cairo_pattern_add_color_stop_rgba(grad, 0.75, pawC.r, pawC.g, pawC.b, pawC.a);
+                cairo_pattern_set_extend(grad, CAIRO_EXTEND_PAD);
+                cairo_set_source(cr, grad);
+                cairo_paint(cr);
+                cairo_pattern_destroy(grad);
             }
+
             if (skin.hasPartArt(limbSpace)) {
-                double sign = (limb.armDir < 0) ? -1.0 : ((limb.armDir == 0 && limb.bendX < 0.0) ? -1.0 : 1.0);
+                double sign = (limb.armDir != 0) ? (double)limb.armDir : ((limb.bendX < 0.0) ? -1.0 : 1.0);
                 auto armMap = [&](SkinPoint p) -> Pt {
-                    double t = std::clamp((double)p.x / 100.0, 0.0, 1.0), omt = 1.0 - t;
+                    double t = std::clamp((double)p.x / 100.0, 0.0, 1.0);
+                    double omt = 1.0 - t;
                     double lx = omt * omt * geo.p0L.x + 2.0 * omt * t * geo.midL.x + t * t * geo.p1L.x;
                     double ly = omt * omt * geo.p0L.y + 2.0 * omt * t * geo.midL.y + t * t * geo.p1L.y;
                     double rx = omt * omt * geo.p0R.x + 2.0 * omt * t * geo.midR.x + t * t * geo.p1R.x;
                     double ry = omt * omt * geo.p0R.y + 2.0 * omt * t * geo.midR.y + t * t * geo.p1R.y;
-                    double cx = (lx + rx) * 0.5, cy = (ly + ry) * 0.5, hx = (rx - lx) * 0.5, hy = (ry - ly) * 0.5;
+                    double cx = (lx + rx) * 0.5, cy = (ly + ry) * 0.5;
+                    double hx = (rx - lx) * 0.5, hy = (ry - ly) * 0.5;
                     double u = sign * ((double)p.y / 10.0);
                     return { (float)(cx + hx * u), (float)(cy + hy * u) };
                 };
                 for (const SkinRegion& region : skin.regions) if (region.space == limbSpace) drawRegion(cr, region, armMap);
                 for (const SkinMark& mark : skin.marks) if (mark.space == limbSpace) drawMark(cr, mark, armMap);
             }
-            if (!isDazed && !skin.colorpoint() && !limb.isBehindBody && limb.armDir != 0 &&
-                pgIt == skin.partGradients.end() && !pal.paws.sameAs(pal.legs)) {
-                paintLinear(limb.root, limb.tip, { {0.74, rgbaOf(pal.paws, 0.0)}, {0.85, rgbaOf(pal.paws)} }, false, true);
-            }
             cairo_restore(cr);
 
+            // Trimmed open contour + 2 cute toe ticks
             cairo_save(cr);
             setCol(cr, limbInk);
             cairo_set_line_width(cr, isBlackRim ? 1.15 : 1.2);
@@ -5285,37 +5314,47 @@ public:
             cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
             traceLimbPath(limb, 2);
             cairo_stroke(cr);
+            double dx = limb.tip.x - limb.root.x, dy = limb.tip.y - limb.root.y;
+            double len = std::max(1.0, std::hypot(dx, dy));
+            double ux = dx / len, uy = dy / len;
+            double nx = -uy, ny = ux;
             cairo_new_path(cr);
             for (double side : { -1.0, 1.0 }) {
-                PtD a = { limb.tip.x + geo.nx * side * 2.5 + geo.ux * 1.6, limb.tip.y + geo.ny * side * 2.5 + geo.uy * 1.6 };
-                PtD b = { limb.tip.x + geo.nx * side * 2.5 + geo.ux * (limb.endW * 0.44), limb.tip.y + geo.ny * side * 2.5 + geo.uy * (limb.endW * 0.44) };
+                PtD a = { limb.tip.x + nx * side * 2.5 + ux * 1.6, limb.tip.y + ny * side * 2.5 + uy * 1.6 };
+                PtD b = { limb.tip.x + nx * side * 2.5 + ux * (limb.endW * 0.44), limb.tip.y + ny * side * 2.5 + uy * (limb.endW * 0.44) };
                 cairo_move_to(cr, a.x, a.y); cairo_line_to(cr, b.x, b.y);
             }
             cairo_stroke(cr);
             cairo_restore(cr);
         };
 
-        double catLayerAlpha = smoothstepD(0.0, 0.45, lift);
+        double liftAlpha = smoothstepD(0.0, 0.22, lift);
         cairo_save(cr);
+        if (liftAlpha < 0.995) cairo_push_group(cr);
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
-        double bodyPendulum = -theta * smoothstepD(0.0, 0.25, lift);
+
+        double bodyPendulum = std::clamp(swingH * 0.16, -0.17, 0.17);
         if (std::fabs(bodyPendulum) > 0.001) {
             cairo_translate(cr, scruffPinch.x, scruffPinch.y);
             cairo_rotate(cr, bodyPendulum);
             cairo_translate(cr, -scruffPinch.x, -scruffPinch.y);
         }
-        bool catGroup = catLayerAlpha < 0.995;
-        if (catGroup) cairo_push_group(cr);
 
+        // Pass 0 (ALL skins): unified sticker-style outer white silhouette rim painted FIRST
         if (whiteOutlineEnabled()) {
             cairo_save(cr);
             setCol(cr, blackOutline);
             double whiteRimW = BlackOutlineW * 2.0 + (pal.outline.set ? 2.0 : 0.0);
             cairo_set_line_width(cr, tailW + whiteRimW);
-            traceTailCurve(); cairo_stroke(cr);
+            traceTailCurve();
+            cairo_stroke(cr);
+
             cairo_set_line_width(cr, whiteRimW);
-            for (const DragLimb* l : { &backLeftLimb, &backRightLimb, &frontLeftLimb, &frontRightLimb }) { traceLimbPath(*l, 0); cairo_stroke(cr); }
+            traceLimbPath(backLeftLimb, 0); cairo_stroke(cr);
+            traceLimbPath(backRightLimb, 0); cairo_stroke(cr);
+            traceLimbPath(frontLeftLimb, 0); cairo_stroke(cr);
+            traceLimbPath(frontRightLimb, 0); cairo_stroke(cr);
             drawEarsLayer(cr, headCenter, physics, skin, true);
             traceLongCatSilhouette(); cairo_stroke(cr);
             cairo_restore(cr);
@@ -5324,99 +5363,134 @@ public:
             cairo_save(cr);
             setCol(cr, pal.outline);
             cairo_set_line_width(cr, tailW + 2.4);
-            traceTailCurve(); cairo_stroke(cr);
+            traceTailCurve();
+            cairo_stroke(cr);
             cairo_set_line_width(cr, 2.4);
-            for (const DragLimb* l : { &backLeftLimb, &backRightLimb, &frontLeftLimb, &frontRightLimb }) { traceLimbPath(*l, 0); cairo_stroke(cr); }
+            traceLimbPath(backLeftLimb, 0); cairo_stroke(cr);
+            traceLimbPath(backRightLimb, 0); cairo_stroke(cr);
+            traceLimbPath(frontLeftLimb, 0); cairo_stroke(cr);
+            traceLimbPath(frontRightLimb, 0); cairo_stroke(cr);
             traceLongCatSilhouette(); cairo_stroke(cr);
             cairo_restore(cr);
         }
 
-        // 1. Tail
+        // 1. Limp drooping tail behind lower body
         cairo_save(cr);
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         if (!isBlackRim && !pal.outline.set) {
             cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.16);
             cairo_set_line_width(cr, tailW + 2.0);
-            traceTailCurve(); cairo_stroke(cr);
+            traceTailCurve();
+            cairo_stroke(cr);
         }
-        auto tg = skin.partGradients.find("tail");
-        if (!isDazed && tg != skin.partGradients.end()) {
-            cairo_pattern_t* tailPat = createPartGradient(tg->second, tailRoot.x, tailRoot.y, tailTip.x, tailTip.y);
-            if (tailPat) cairo_set_source(cr, tailPat); else setCol(cr, tg->second.to);
-            cairo_set_line_width(cr, tailW);
-            traceTailCurve(); cairo_stroke(cr);
-            if (tailPat) cairo_pattern_destroy(tailPat);
+        cairo_pattern_t* dragTailPat = nullptr;
+        if (isDazed) {
+            cairo_set_source_rgb(cr, 40.0/255.0, 49.0/255.0, 87.0/255.0);
+        } else if (auto tg = skin.partGradients.find("tail"); tg != skin.partGradients.end()) {
+            dragTailPat = createPartGradient(tg->second, tailRoot.x, tailRoot.y, tailTip.x, tailTip.y);
+            if (dragTailPat) cairo_set_source(cr, dragTailPat);
+            else setCol(cr, tg->second.to);
         } else {
-            if (isDazed) cairo_set_source_rgb(cr, 40.0/255.0, 49.0/255.0, 87.0/255.0);
-            else setCol(cr, pal.tail);
-            cairo_set_line_width(cr, tailW);
-            traceTailCurve(); cairo_stroke(cr);
+            setCol(cr, pal.tail);
         }
+        cairo_set_line_width(cr, tailW);
+        traceTailCurve();
+        cairo_stroke(cr);
+        if (dragTailPat) cairo_pattern_destroy(dragTailPat);
         if (pal.stripes.set && !isBlackRim && !skin.colorpoint() && !isDazed) {
             auto evalTailPt = [&](double t) -> PtD {
                 double u = 1.0 - t;
-                return { u*u*u*tailRoot.x + 3*u*u*t*tailC1.x + 3*u*t*t*tailC2.x + t*t*t*tailTip.x,
-                         u*u*u*tailRoot.y + 3*u*u*t*tailC1.y + 3*u*t*t*tailC2.y + t*t*t*tailTip.y };
+                return {
+                    u*u*u*tailRoot.x + 3*u*u*t*tailC1.x + 3*u*t*t*tailC2.x + t*t*t*tailTip.x,
+                    u*u*u*tailRoot.y + 3*u*u*t*tailC1.y + 3*u*t*t*tailC2.y + t*t*t*tailTip.y
+                };
             };
             setCol(cr, pal.stripes, 0.42);
             cairo_set_line_width(cr, tailW * 0.88);
             cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
             for (double t0 : { 0.24, 0.50, 0.74 }) {
                 PtD pA = evalTailPt(t0), pB = evalTailPt(t0 + 0.09);
-                cairo_new_path(cr); cairo_move_to(cr, pA.x, pA.y); cairo_line_to(cr, pB.x, pB.y); cairo_stroke(cr);
+                cairo_new_path(cr);
+                cairo_move_to(cr, pA.x, pA.y);
+                cairo_line_to(cr, pB.x, pB.y);
+                cairo_stroke(cr);
             }
             cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
         }
         if (!isDazed && pal.tailTip.set) {
+            // Tail tip = last 22% of the tail curve (de Casteljau split at t = 0.78, same as the idle tail tip).
+            // A straight chord only touches the curve at the tip and cuts across the bend, so the colour ended up
+            // outside the silhouette on the convex side and left fur showing on the inside.
             const double tipT = 0.78;
             PtD ta = lerpPtD(tailRoot, tailC1, tipT), tb = lerpPtD(tailC1, tailC2, tipT), tq = lerpPtD(tailC2, tailTip, tipT);
             PtD td = lerpPtD(ta, tb, tipT), te = lerpPtD(tb, tq, tipT), ts = lerpPtD(td, te, tipT);
             setCol(cr, pal.tailTip);
             cairo_set_line_width(cr, tailW);
-            cairo_new_path(cr); cairo_move_to(cr, ts.x, ts.y); cairo_curve_to(cr, te.x, te.y, tq.x, tq.y, tailTip.x, tailTip.y); cairo_stroke(cr);
+            cairo_new_path(cr);
+            cairo_move_to(cr, ts.x, ts.y);
+            cairo_curve_to(cr, te.x, te.y, tq.x, tq.y, tailTip.x, tailTip.y);
+            cairo_stroke(cr);
         }
         cairo_restore(cr);
+
         if (!skin.decorations.empty()) {
             Pt dragTailTip = { (float)tailTip.x, (float)tailTip.y };
-            drawDecorations(cr, (float)rumpCenterX, (float)torsoBottomY, headCenter, physics, skin, nullptr, &dragTailTip, anchorBit(SkinAnchorPoint::TailTip));
+            drawDecorations(cr, (float)rumpCenterX, (float)torsoBottomY, headCenter, physics, skin,
+                            nullptr, &dragTailTip, anchorBit(SkinAnchorPoint::TailTip));
         }
 
-        // 2. Hind legs
+        // 2. Dangling hind legs emerging from lower belly hem
         drawDragLimb(backLeftLimb);
         drawDragLimb(backRightLimb);
 
+        // 3. Native 3D Ears tucked cleanly behind the head crown
+        drawEarsLayer(cr, headCenter, physics, skin, false);
 
-        // 4. Head + stretched torso
+        // 4. Unified Front-Facing Long-Cat Head + Subtle Scruff Pinch + Stretched Torso
         auto headMap      = [&](SkinPoint p) { return headPoint(p, false, skin, headCenter, physics, false); };
         auto headWhiteMap = [&](SkinPoint p) { return headPoint(p, false, skin, headCenter, physics, true); };
         auto skullMap     = [&](SkinPoint p) { return headPoint(p, true,  skin, headCenter, physics, false); };
+
         if (isDazed) {
-            drawEarsLayer(cr, headCenter, physics, skin, false);
             cairo_save(cr);
             traceLongCatSilhouette();
+            cairo_pattern_t* bg = cairo_pattern_create_linear(headCenterD.x, headCenterD.y + 30.0, rumpCenterX, torsoBottomY + bottomDip);
+            cairo_pattern_add_color_stop_rgba(bg, 0.0, 244.0/255.0, 223.0/255.0, 184.0/255.0, 1.0);
+            cairo_pattern_add_color_stop_rgba(bg, 1.0, 200.0/255.0, 167.0/255.0, 122.0/255.0, 1.0);
+            cairo_set_source(cr, bg);
+            cairo_fill_preserve(cr);
+            cairo_pattern_destroy(bg);
             cairo_clip(cr);
-            paintLinear({ H.x, H.y + 30.0 }, { rumpCenterX, torsoBottomY + bottomDip }, { {0.0, {244.0/255, 223.0/255, 184.0/255, 1}}, {1.0, {200.0/255, 167.0/255, 122.0/255, 1}} }, true, true);
-            double tunicBotY = H.y + torsoLen * 0.74;
-            cairo_save(cr);
+
+            double tunicBotY = headCenterD.y + torsoLen * 0.74;
             cairo_new_path(cr);
-            cairo_move_to(cr, H.x - cheekHalfW * 1.4, H.y);
-            cairo_line_to(cr, H.x + cheekHalfW * 1.4, H.y);
+            cairo_move_to(cr, headCenterD.x - cheekHalfW * 1.4, headCenterD.y);
+            cairo_line_to(cr, headCenterD.x + cheekHalfW * 1.4, headCenterD.y);
             cairo_line_to(cr, rumpCenterX + hipHalfW * 1.2, tunicBotY);
-            cairo_curve_to(cr, rumpCenterX + hipHalfW * 0.5, tunicBotY + 14.0, rumpCenterX - hipHalfW * 0.5, tunicBotY + 14.0, rumpCenterX - hipHalfW * 1.2, tunicBotY);
+            cairo_curve_to(cr, rumpCenterX + hipHalfW * 0.5, tunicBotY + 14.0,
+                           rumpCenterX - hipHalfW * 0.5, tunicBotY + 14.0,
+                           rumpCenterX - hipHalfW * 1.2, tunicBotY);
             cairo_close_path(cr);
-            cairo_clip(cr);
-            paintLinear({ H.x - 16.0, H.y + 20.0 }, { rumpCenterX + 12.0, tunicBotY + 10.0 }, { {0.0, {85.0/255, 95.0/255, 155.0/255, 1}}, {1.0, {37.0/255, 46.0/255, 88.0/255, 1}} }, true, true);
-            cairo_restore(cr);
+            cairo_pattern_t* cg = cairo_pattern_create_linear(headCenterD.x - 16.0, headCenterD.y + 20.0, rumpCenterX + 12.0, tunicBotY + 10.0);
+            cairo_pattern_add_color_stop_rgba(cg, 0.0, 85.0/255.0, 95.0/255.0, 155.0/255.0, 1.0);
+            cairo_pattern_add_color_stop_rgba(cg, 1.0, 37.0/255.0, 46.0/255.0, 88.0/255.0, 1.0);
+            cairo_set_source(cr, cg);
+            cairo_fill(cr);
+            cairo_pattern_destroy(cg);
+
             cairo_set_source_rgba(cr, 124.0/255.0, 134.0/255.0, 188.0/255.0, 0.65);
             cairo_set_line_width(cr, 1.3);
             cairo_new_path(cr);
             cairo_move_to(cr, rumpCenterX - hipHalfW, tunicBotY - 1.0);
-            cairo_curve_to(cr, rumpCenterX - hipHalfW * 0.45, tunicBotY + 11.0, rumpCenterX + hipHalfW * 0.45, tunicBotY + 11.0, rumpCenterX + hipHalfW, tunicBotY - 1.0);
+            cairo_curve_to(cr, rumpCenterX - hipHalfW * 0.45, tunicBotY + 11.0,
+                           rumpCenterX + hipHalfW * 0.45, tunicBotY + 11.0,
+                           rumpCenterX + hipHalfW, tunicBotY - 1.0);
             cairo_stroke(cr);
             cairo_restore(cr);
 
             cairo_save(cr);
-            cairo_translate(cr, H.x, H.y);
+            cairo_translate(cr, headCenterD.x, headCenterD.y);
             cairo_rotate(cr, (double)physics.headTilt.value);
             cairo_new_path(cr);
             cairo_move_to(cr, 0.0, -33.0 - scruffTuftH);
@@ -5425,189 +5499,211 @@ public:
             cairo_curve_to(cr, -25.0, 41.0, -48.0, 32.0, -48.0, 9.0);
             cairo_curve_to(cr, -48.0, -16.0, -28.0, -35.0, 0.0, -33.0 - scruffTuftH);
             cairo_close_path(cr);
-            cairo_clip(cr);
-            paintLinear({ -16.0, -38.0 }, { 15.0, 42.0 }, { {0.0, {104.0/255, 113.0/255, 180.0/255, 1}}, {1.0, {47.0/255, 56.0/255, 109.0/255, 1}} }, true, true);
+            cairo_pattern_t* hg = cairo_pattern_create_linear(-16.0, -38.0, 15.0, 42.0);
+            cairo_pattern_add_color_stop_rgba(hg, 0.0, 104.0/255.0, 113.0/255.0, 180.0/255.0, 1.0);
+            cairo_pattern_add_color_stop_rgba(hg, 1.0, 47.0/255.0, 56.0/255.0, 109.0/255.0, 1.0);
+            cairo_set_source(cr, hg);
+            cairo_fill(cr);
+            cairo_pattern_destroy(hg);
             cairo_restore(cr);
         } else {
-            auto paintFur = [&](auto&& traceClip) {
+            cairo_save(cr);
+            traceLongCatSilhouette();
+            setCol(cr, pal.body);
+            cairo_fill_preserve(cr);
+            cairo_clip(cr);
+
+            if (pal.bodyShade.set) {
+                cairo_pattern_t* bg = cairo_pattern_create_linear(headCenterD.x, headCenterD.y - 36.0, rumpCenterX, torsoBottomY + bottomDip);
+                cairo_pattern_add_color_stop_rgba(bg, 0.15, pal.body.r, pal.body.g, pal.body.b, pal.body.a);
+                cairo_pattern_add_color_stop_rgba(bg, 1.0,  pal.bodyShade.r, pal.bodyShade.g, pal.bodyShade.b, pal.bodyShade.a);
+                cairo_pattern_set_extend(bg, CAIRO_EXTEND_PAD);
+                cairo_set_source(cr, bg);
+                cairo_paint(cr);
+                cairo_pattern_destroy(bg);
+            }
+
+            if (auto bg = skin.partGradients.find("body"); bg != skin.partGradients.end()) {
                 cairo_save(cr);
-                traceClip();
-                setCol(cr, pal.body);
-                cairo_fill_preserve(cr);
+                jawSide(cr, false, skin, headCenter, physics);
                 cairo_clip(cr);
-                if (pal.bodyShade.set) {
-                    paintLinear({ H.x, H.y - 36.0 }, { rumpCenterX, torsoBottomY + bottomDip }, { {0.15, rgbaOf(pal.body)}, {1.0, rgbaOf(pal.bodyShade)} }, true, true);
-                }
-                if (auto bg = skin.partGradients.find("body"); bg != skin.partGradients.end()) {
-                    cairo_save(cr); jawStaticSide(false); cairo_clip(cr);
-                    paintClampedPartGradient(cr, bg->second, H.x, H.y + 20.0, rumpCenterX, torsoBottomY + bottomDip);
-                    cairo_restore(cr);
-                }
-                if (pal.headBody.set && !pal.headBody.sameAs(pal.body)) {
-                    cairo_save(cr); jawStaticSide(true); cairo_clip(cr);
-                    setCol(cr, pal.headBody); cairo_paint(cr);
-                    cairo_restore(cr);
-                }
-                if (auto hg = skin.partGradients.find("head"); hg != skin.partGradients.end()) {
-                    cairo_save(cr); jawStaticSide(true); cairo_clip(cr);
-                    paintClampedPartGradient(cr, hg->second, H.x, H.y - 48.0, H.x, H.y + 40.0);
-                    cairo_restore(cr);
-                }
-                if (pal.points.set) {
-                    const SkinColor& point = pal.points;
-                    const SkinColor& mid = pal.pointsMid.set ? pal.pointsMid : point;
+                paintClampedPartGradient(cr, bg->second, headCenterD.x, headCenterD.y + 20.0, rumpCenterX, torsoBottomY + bottomDip);
+                cairo_restore(cr);
+            }
+
+            if (pal.headBody.set && !pal.headBody.sameAs(pal.body)) {
+                cairo_save(cr);
+                jawSide(cr, true, skin, headCenter, physics);
+                cairo_clip(cr);
+                setCol(cr, pal.headBody);
+                cairo_paint(cr);
+                cairo_restore(cr);
+            }
+
+            if (auto hg = skin.partGradients.find("head"); hg != skin.partGradients.end()) {
+                cairo_save(cr);
+                jawSide(cr, true, skin, headCenter, physics);
+                cairo_clip(cr);
+                paintClampedPartGradient(cr, hg->second, headCenterD.x, headCenterD.y - 48.0, headCenterD.x, headCenterD.y + 40.0);
+                cairo_restore(cr);
+            }
+
+            if (pal.points.set) {
+                const SkinColor& point = pal.points;
+                const SkinColor& mid = pal.pointsMid.set ? pal.pointsMid : point;
+                cairo_save(cr);
+                cairo_translate(cr, headCenterD.x, headCenterD.y + 3.0);
+                cairo_scale(cr, 1.22 * hs, 0.88 * hs);
+                cairo_pattern_t* g = cairo_pattern_create_radial(0.0, 0.0, 0.0, 0.0, 0.0, 31.0);
+                cairo_pattern_add_color_stop_rgba(g, 0.0,  point.r, point.g, point.b, point.a);
+                cairo_pattern_add_color_stop_rgba(g, 0.42, point.r, point.g, point.b, point.a * 0.92);
+                cairo_pattern_add_color_stop_rgba(g, 0.74, mid.r,   mid.g,   mid.b,   mid.a * 0.62);
+                cairo_pattern_add_color_stop_rgba(g, 1.0,  mid.r,   mid.g,   mid.b,   0.0);
+                cairo_pattern_set_extend(g, CAIRO_EXTEND_PAD);
+                cairo_set_source(cr, g);
+                cairo_new_path(cr);
+                cairo_arc(cr, 0.0, 0.0, 31.0, 0.0, PI * 2.0);
+                cairo_fill(cr);
+                cairo_pattern_destroy(g);
+                cairo_restore(cr);
+            }
+
+            for (const SkinRegion& region : skin.regions) {
+                if (region.space != SkinSpace::Body) continue;
+                cairo_save(cr);
+                jawSide(cr, false, skin, headCenter, physics);
+                cairo_clip(cr);
+                drawRegion(cr, region, dragBodyMap);
+                cairo_restore(cr);
+            }
+            for (const SkinRegion& region : skin.regions) {
+                if (region.space != SkinSpace::Head && region.space != SkinSpace::Skull) continue;
+                cairo_save(cr);
+                jawSide(cr, true, skin, headCenter, physics);
+                cairo_clip(cr);
+                if (region.space == SkinSpace::Skull) drawRegion(cr, region, skullMap);
+                else drawRegion(cr, region, headMap);
+                cairo_restore(cr);
+            }
+
+            for (const SkinMark& mark : skin.marks) {
+                if (mark.space == SkinSpace::Body) {
                     cairo_save(cr);
-                    cairo_translate(cr, H.x, H.y + 3.0);
-                    cairo_scale(cr, 1.22 * hs, 0.88 * hs);
-                    cairo_pattern_t* g = cairo_pattern_create_radial(0.0, 0.0, 0.0, 0.0, 0.0, 31.0);
-                    cairo_pattern_add_color_stop_rgba(g, 0.0,  point.r, point.g, point.b, point.a);
-                    cairo_pattern_add_color_stop_rgba(g, 0.42, point.r, point.g, point.b, point.a * 0.92);
-                    cairo_pattern_add_color_stop_rgba(g, 0.74, mid.r,   mid.g,   mid.b,   mid.a * 0.62);
-                    cairo_pattern_add_color_stop_rgba(g, 1.0,  mid.r,   mid.g,   mid.b,   0.0);
-                    cairo_pattern_set_extend(g, CAIRO_EXTEND_PAD);
-                    cairo_set_source(cr, g);
-                    cairo_paint(cr);
-                    cairo_pattern_destroy(g);
+                    jawSide(cr, false, skin, headCenter, physics);
+                    cairo_clip(cr);
+                    drawMark(cr, mark, dragBodyMap);
                     cairo_restore(cr);
-                }
-                for (const SkinRegion& region : skin.regions) {
-                    if (region.space != SkinSpace::Body) continue;
-                    cairo_save(cr); jawStaticSide(false); cairo_clip(cr);
-                    drawRegion(cr, region, dragBodyMap);
-                    cairo_restore(cr);
-                }
-                for (const SkinRegion& region : skin.regions) {
-                    if (region.space != SkinSpace::Head && region.space != SkinSpace::Skull) continue;
-                    cairo_save(cr); jawStaticSide(true); cairo_clip(cr);
-                    if (region.space == SkinSpace::Skull) drawRegion(cr, region, skullMap); else drawRegion(cr, region, headMap);
-                    cairo_restore(cr);
-                }
-                for (const SkinMark& mark : skin.marks) {
-                    if (mark.space == SkinSpace::Body) {
-                        cairo_save(cr); jawStaticSide(false); cairo_clip(cr);
-                        drawMark(cr, mark, dragBodyMap);
+                } else if (mark.space == SkinSpace::Skull || mark.space == SkinSpace::Head) {
+                    auto mapFn = [&](SkinPoint p) -> Pt {
+                        if (mark.space == SkinSpace::Skull) return skullMap(p);
+                        return (skin.builtIn && isMilkMark(mark)) ? headWhiteMap(p) : headMap(p);
+                    };
+                    if (shouldSkipJawHeadClip(mark)) {
+                        drawMark(cr, mark, mapFn);
+                    } else {
+                        cairo_save(cr);
+                        jawSide(cr, true, skin, headCenter, physics);
+                        cairo_clip(cr);
+                        drawMark(cr, mark, mapFn);
                         cairo_restore(cr);
-                    } else if (mark.space == SkinSpace::Skull || mark.space == SkinSpace::Head) {
-                        auto mapFn = [&](SkinPoint p) -> Pt {
-                            if (mark.space == SkinSpace::Skull) return skullMap(p);
-                            return (skin.builtIn && isMilkMark(mark)) ? headWhiteMap(p) : headMap(p);
-                        };
-                        if (shouldSkipJawHeadClip(mark)) {
-                            drawMark(cr, mark, mapFn);
-                        } else {
-                            cairo_save(cr); jawStaticSide(true); cairo_clip(cr);
-                            drawMark(cr, mark, mapFn);
-                            cairo_restore(cr);
-                        }
                     }
                 }
-                cairo_restore(cr);
-            };
-            auto strokeRim = [&](auto&& tracePath) {
-                if (isBlackRim) return;
+            }
+            cairo_restore(cr);
+
+            if (!isBlackRim) {
                 cairo_save(cr);
-                if (pal.outline.set) setCol(cr, pal.outline); else cairo_set_source_rgba(cr, 0.18, 0.15, 0.12, 0.22);
+                if (pal.outline.set) setCol(cr, pal.outline);
+                else cairo_set_source_rgba(cr, 0.18, 0.15, 0.12, 0.22);
                 cairo_set_line_width(cr, pal.outline.set ? 1.5 : 1.05);
-                tracePath(); cairo_stroke(cr);
+                traceLongCatSilhouette();
+                cairo_stroke(cr);
                 cairo_restore(cr);
-            };
-            // 4a. Back + pinched nape skin + torso, 4b. ears in front of the nape, 4c. head over the ear bases
-            paintFur(traceLongCatSilhouette);
-            strokeRim(traceLongCatSilhouette);
-            drawEarsLayer(cr, headCenter, physics, skin, false);
-            paintFur(traceHeadOnly);
-            strokeRim(traceHeadLeftRim);
+            }
+
+            // Subtle soft chin shadow curve
+            cairo_save(cr);
+            if (isBlackRim) cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.16);
+            else if (pal.outline.set) setCol(cr, pal.outline, 0.45);
+            else cairo_set_source_rgba(cr, 0.18, 0.15, 0.12, 0.16);
+            cairo_set_line_width(cr, isBlackRim ? 1.05 : 1.0);
+            cairo_new_path(cr);
+            cairo_move_to(cr, headCenterD.x - cheekHalfW * 0.56, headCenterD.y + chinY - 2.5 * hs);
+            quadCurveTo(cr, headCenterD.x - cheekHalfW * 0.56, headCenterD.y + chinY - 2.5 * hs,
+                        headCenterD.x, headCenterD.y + chinY + 3.5 * hs,
+                        headCenterD.x + cheekHalfW * 0.56, headCenterD.y + chinY - 2.5 * hs);
+            cairo_stroke(cr);
+            cairo_restore(cr);
         }
 
-        // 5. Face
+        // 5. Native KuroCat Face Features (normal authentic almond eyes — no round bug-eyes!)
         drawHeadFeatures(cr, headCenter, physics, eyeTheme, skin, 0.0, 0.0, overrideSkinIris);
-        if (catGroup) { cairo_pop_group_to_source(cr); cairo_paint_with_alpha(cr, catLayerAlpha); }
 
-        // 5b. Desk props: pure lift leaves them on the desk, otherwise the paws carry them
-        if (pureLift) {
-            double deskAlpha = 1.0 - smoothstepD(0.0, 0.25, liftS);
-            if (deskAlpha > 0.02) {
-                cairo_save(cr);
-                cairo_push_group(cr);
-                cairo_translate(cr, scruffPinch.x, scruffPinch.y);
-                cairo_rotate(cr, -bodyPendulum);
-                cairo_translate(cr, -scruffPinch.x, -scruffPinch.y);
-                if (physics.isTabletActive) { drawTablet(cr, physics, kbTheme, eyeTheme); drawParkedStylus(cr, kbTheme, eyeTheme); }
-                else drawMouse(cr, physics, kbSkin);
-                drawKeyboard(cr, physics, kbSkin, eyeTheme, showKeyLegends, keyboardMarquee, flipped);
-                cairo_pop_group_to_source(cr);
-                cairo_paint_with_alpha(cr, deskAlpha);
-                cairo_restore(cr);
-            }
+        // 6. Carried Keyboard + Mouse / Graphics Tablet + Held Stylus gripped cleanly by its middle!
+        constexpr double carryScale = 0.74;
+        double carryAngle = bodyPendulum * 0.85 + swingH * 0.14;
+        Pt kbMid = KeyboardLayout::screenQuadPoint(0.5f, 0.5f);
+        PtD deskAnchor = physics.isTabletActive ? PtD{ 134.0, (double)kbMid.y } : PtD{ 166.0, (double)kbMid.y };
+        PtD carryPivot = { rumpCenterX + 4.0, std::min(226.0, shoulderY + armLen + 36.0) };
+        double carryCos = std::cos(carryAngle), carrySin = std::sin(carryAngle);
+        auto mapDesk = [&](Pt dp) -> PtD {
+            double dx = ((double)dp.x - deskAnchor.x) * carryScale;
+            double dy = ((double)dp.y - deskAnchor.y) * carryScale;
+            return { carryPivot.x + dx * carryCos - dy * carrySin,
+                     carryPivot.y + dx * carrySin + dy * carryCos };
+        };
+
+        DragLimb carriedLeftLimb = frontLeftLimb;
+        DragLimb carriedRightLimb = frontRightLimb;
+        Pt deskNib = physics.scruffStartedHoldingPen ? physics.scruffPenStartNib : CatPhysics::tabletQuadPoint(0.58f, 0.48f);
+        double carryPenRad = (double)(physics.scruffStartedHoldingPen ? physics.scruffPenStartAngle : physics.stylusAngle()) + carryAngle;
+        PtD carriedNib = mapDesk(deskNib);
+        PtD carriedPenGrip = {
+            carriedNib.x + std::cos(carryPenRad) * ((double)CatPhysics::StylusBarrelGripDistance * carryScale),
+            carriedNib.y + std::sin(carryPenRad) * ((double)CatPhysics::StylusBarrelGripDistance * carryScale)
+        };
+        PtD leftGearTarget = physics.isTabletActive
+            ? carriedPenGrip
+            : mapDesk({ CatPhysics::MouseBaseCenter.x + physics.mouseOffset.point().x,
+                        CatPhysics::MouseBaseCenter.y + physics.mouseOffset.point().y - 4.0f });
+        PtD rightGearTarget = mapDesk(KeyboardLayout::screenQuadPoint(0.52f, 0.12f));
+        carriedLeftLimb.tip = lerpPtD(leftGearTarget, frontLeftLimb.tip, startle);
+        carriedRightLimb.tip = lerpPtD(rightGearTarget, frontRightLimb.tip, startle);
+
+        cairo_save(cr);
+        cairo_translate(cr, carryPivot.x, carryPivot.y);
+        cairo_rotate(cr, carryAngle);
+        cairo_scale(cr, carryScale, carryScale);
+        cairo_translate(cr, -deskAnchor.x, -deskAnchor.y);
+        if (physics.isTabletActive) {
+            drawTablet(cr, physics, kbTheme, eyeTheme);
         } else {
-            PtD worldKeyboardGrip = rot(frontRightLimb.tip, scruffPinch, bodyPendulum);
-            PtD worldPointerGrip = rot(frontLeftLimb.tip, scruffPinch, bodyPendulum);
-            double keyboardHandAngle = std::atan2(frontRightLimb.tip.y - frontRightLimb.root.y, frontRightLimb.tip.x - frontRightLimb.root.x) - PI / 2.0;
-            double pointerHandAngle = std::atan2(frontLeftLimb.tip.y - frontLeftLimb.root.y, frontLeftLimb.tip.x - frontLeftLimb.root.x) - PI / 2.0;
-            auto carryTransform = [&](PtD source, PtD target, double angle, auto&& drawFn) {
-                PtD grip = lerpPtD(source, target, carry);
-                cairo_save(cr);
-                cairo_translate(cr, scruffPinch.x, scruffPinch.y);
-                cairo_rotate(cr, -bodyPendulum);
-                cairo_translate(cr, -scruffPinch.x, -scruffPinch.y);
-                cairo_translate(cr, grip.x, grip.y);
-                cairo_rotate(cr, angle * carry);
-                cairo_translate(cr, -source.x, -source.y);
-                drawFn();
-                cairo_restore(cr);
+            drawMouse(cr, physics, kbSkin);
+        }
+        drawKeyboard(cr, physics, kbSkin, eyeTheme, showKeyLegends, keyboardMarquee, flipped);
+        cairo_restore(cr);
+
+        // 7. Dangling / Carrying Front Arms
+        drawDragLimb(carriedLeftLimb);
+        drawDragLimb(carriedRightLimb);
+
+        if (physics.isTabletActive) {
+            float press = std::clamp(physics.tabletPenPress.value, 0.0f, 1.0f);
+            PtD heldNib = {
+                carriedLeftLimb.tip.x - std::cos(carryPenRad) * ((double)CatPhysics::StylusBarrelGripDistance * carryScale),
+                carriedLeftLimb.tip.y - std::sin(carryPenRad) * ((double)CatPhysics::StylusBarrelGripDistance * carryScale) + press * 1.1
             };
-            Pt kbG = KeyboardLayout::screenQuadPoint(0.24f, 0.12f);
-            carryTransform(PtD{ kbG.x, kbG.y }, worldKeyboardGrip, 0.26 + keyboardHandAngle + bodyPendulum, [&]() {
-                drawKeyboard(cr, physics, kbSkin, eyeTheme, showKeyLegends, keyboardMarquee, flipped);
-            });
-            if (physics.isTabletActive) {
-                constexpr double kGripDist = 22.0, kGripOffX = -5.0;   // macOS stylus constants
-                Pt tg2 = CatPhysics::tabletQuadPoint(0.62f, 0.12f);
-                PtD tabletGrip = { tg2.x, tg2.y };
-                double tabletBaseAngle = -0.18;
-                double tabletAngle = tabletBaseAngle + pointerHandAngle + bodyPendulum;
-                carryTransform(tabletGrip, worldPointerGrip, tabletAngle, [&]() { drawTablet(cr, physics, kbTheme, eyeTheme); });
-                bool sourceHeldPen = physics.leftPawOnMouse || physics.scruffStartedHoldingPen;
-                Pt on = sourceHeldPen
-                    ? (physics.isScruffDragging() && physics.scruffStartedHoldingPen ? physics.scruffPenStartNib : physics.tabletNib.point())
-                    : CatPhysics::tabletQuadPoint(0.88f, -0.02f);
-                PtD originalNib = { on.x, on.y };
-                Pt pt2 = CatPhysics::tabletQuadPoint(0.18f, -0.02f);
-                double originalAngle = sourceHeldPen
-                    ? (double)(physics.isScruffDragging() && physics.scruffStartedHoldingPen ? physics.scruffPenStartAngle : physics.stylusAngle())
-                    : std::atan2(pt2.y - originalNib.y, pt2.x - originalNib.x);
-                double originalLength = sourceHeldPen ? 35.0 : std::hypot(pt2.x - originalNib.x, pt2.y - originalNib.y);
-                double heldAngle = (double)CatPhysics::StylusBaseAngle + pointerHandAngle + bodyPendulum;
-                double penToTabletAngle = (double)CatPhysics::StylusBaseAngle - tabletBaseAngle;
-                PtD gripOffset = { kGripOffX * std::cos(-tabletBaseAngle), kGripOffX * std::sin(-tabletBaseAngle) };
-                PtD padContact = { tabletGrip.x + gripOffset.x - std::cos(penToTabletAngle) * kGripDist,
-                                   tabletGrip.y + gripOffset.y - std::sin(penToTabletAngle) * kGripDist };
-                PtD localContact = lerpPtD(originalNib, padContact, carry);
-                PtD tabletWorldGrip = lerpPtD(tabletGrip, worldPointerGrip, carry);
-                PtD contactDelta = rot(localContact, tabletGrip, tabletAngle * carry);
-                PtD penNib = { tabletWorldGrip.x + contactDelta.x - tabletGrip.x, tabletWorldGrip.y + contactDelta.y - tabletGrip.y };
-                cairo_save(cr);
-                cairo_translate(cr, scruffPinch.x, scruffPinch.y);
-                cairo_rotate(cr, -bodyPendulum);
-                cairo_translate(cr, -scruffPinch.x, -scruffPinch.y);
-                cairo_translate(cr, penNib.x, penNib.y);
-                cairo_rotate(cr, lerpD(originalAngle, heldAngle, carry));
-                drawStylusBody(cr, lerpD(originalLength, 35.0, carry), kbTheme, eyeTheme, physics.tabletPenPress.value * (float)(1.0 - carry));
-                cairo_restore(cr);
-            } else {
-                PtD mouseGrip = { (double)CatPhysics::MouseBaseCenter.x + physics.mouseOffset.point().x + 2.0,
-                                  (double)CatPhysics::MouseBaseCenter.y + physics.mouseOffset.point().y - 4.0 };
-                PtD mouseTarget = { worldPointerGrip.x - 2.0, worldPointerGrip.y + 2.0 };
-                carryTransform(mouseGrip, mouseTarget, -0.18 + pointerHandAngle + bodyPendulum, [&]() { drawMouse(cr, physics, kbSkin); });
-            }
+            cairo_save(cr);
+            cairo_translate(cr, heldNib.x, heldNib.y);
+            cairo_rotate(cr, carryPenRad);
+            cairo_scale(cr, carryScale, carryScale);
+            drawStylusBody(cr, 35.0, kbTheme, eyeTheme, press);
+            cairo_restore(cr);
         }
 
-        // 6. Front arms over the carried props
-        if (catGroup) cairo_push_group(cr);
-        drawDragLimb(frontLeftLimb);
-        drawDragLimb(frontRightLimb);
+        // 8. Skin stickers / decorations stay anchored cleanly to the lifted cat's head and neck!
         if (!skin.decorations.empty()) {
-            Pt dragNeck = { (float)(H.x + hipLagX * 0.08), (float)(H.y + 36.0 * hs) };
+            Pt dragNeck = { (float)(headCenterD.x + hipLagX * 0.08), (float)(headCenterD.y + 36.0 * hs) };
             Pt dragTailTip = { (float)tailTip.x, (float)tailTip.y };
             drawDecorations(cr, (float)rumpCenterX, (float)torsoBottomY, headCenter, physics, skin, &dragNeck, &dragTailTip,
                             anchorBit(SkinAnchorPoint::HeadTop) | anchorBit(SkinAnchorPoint::Face) | anchorBit(SkinAnchorPoint::Neck));
@@ -5615,7 +5711,11 @@ public:
         if (physics.musicIntensity > 0.01f) {
             drawMusicHeadphones(cr, headCenter, physics, eyeTheme, skin);
         }
-        if (catGroup) { cairo_pop_group_to_source(cr); cairo_paint_with_alpha(cr, catLayerAlpha); }
+
+        if (liftAlpha < 0.995) {
+            cairo_pop_group_to_source(cr);
+            cairo_paint_with_alpha(cr, liftAlpha);
+        }
         cairo_restore(cr);
     }
 

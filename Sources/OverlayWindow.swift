@@ -1550,7 +1550,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var flipSwitch: KuroSwitchControl?
     private var angerSwitch: KuroSwitchControl?
     private var dragAnimSwitch: KuroSwitchControl?
-    private var pureScruffDragSwitch: KuroSwitchControl?
     private var badgesSwitch: KuroSwitchControl?
     private var mouseBadgesSwitch: KuroSwitchControl?
     private var legendsSwitch: KuroSwitchControl?
@@ -1608,7 +1607,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         skinPopup = nil; skinsDirLabel = nil; resetSkinsDirBtn = nil
         kbPopup = nil; eyePopup = nil; tabletPopup = nil; typingLimbPopup = nil
         obsPopup = nil; langSeg = nil
-        whiteOutlineSwitch = nil; flipSwitch = nil; angerSwitch = nil; dragAnimSwitch = nil; pureScruffDragSwitch = nil
+        whiteOutlineSwitch = nil; flipSwitch = nil; angerSwitch = nil; dragAnimSwitch = nil
         badgesSwitch = nil; mouseBadgesSwitch = nil; legendsSwitch = nil; marqueeSwitch = nil
         marqueeModePopup = nil
         levelKeyboardSwitch = nil; fullscreenOverlaySwitch = nil; clickThroughSwitch = nil
@@ -1889,7 +1888,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 card.addSubview(makeBtn(tr("重置位置", "Reset"), variant: .secondary, action: #selector(onTapResetPose), frame: NSRect(x: 386, y: r7 + 8, width: 78, height: 24)))
             }
         } else if activeTab == 1 {
-            addCard(rows: 11) { card, rh in
+            addCard(rows: 10) { card, rh in
                 card.addSubview(makeLabel(tr("拎起拖拽动画", "Scruff-Drag Lift Animation"), yPos: 3, width: 360))
                 let dragSw = makeSwitch(s.enableDragAnimation, action: #selector(onToggleDragAnim), yPos: 3)
                 card.addSubview(dragSw); dragAnimSwitch = dragSw
@@ -1970,12 +1969,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 tabP.target = self
                 tabP.action = #selector(onTabletSelected)
                 card.addSubview(tabP); tabletPopup = tabP
-                addRowDivider(card, yPos: r9 + rh)
-
-                let r10 = 3 + rh * 10
-                card.addSubview(makeLabel(tr("纯拎小猫（拖拽不带键鼠）", "Pure Scruff Lift (Leave Desk)"), yPos: r10, width: 360))
-                let pureSw = makeSwitch(s.pureScruffDrag, action: #selector(onTogglePureScruffDrag), yPos: r10)
-                card.addSubview(pureSw); pureScruffDragSwitch = pureSw
             }
         } else {
             addCard(rows: 9) { card, rh in
@@ -2257,11 +2250,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func onToggleDragAnim() {
         CatSettings.shared.enableDragAnimation = (dragAnimSwitch?.isOn == true)
-        onSettingsChanged?()
-    }
-
-    @objc private func onTogglePureScruffDrag() {
-        CatSettings.shared.pureScruffDrag = (pureScruffDragSwitch?.isOn == true)
         onSettingsChanged?()
     }
 

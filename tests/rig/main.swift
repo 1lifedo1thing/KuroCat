@@ -21,7 +21,6 @@ final class RenderSettings {
  let overrideSkinIris = false
  let isEditMode = false
  let isEnglish = false
- let pureScruffDrag = false
  let scale: CGFloat = 1.0
 }
 

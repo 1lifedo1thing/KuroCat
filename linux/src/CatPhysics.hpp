@@ -55,7 +55,6 @@ struct CatSettings {
     bool whiteOutline = true;
     bool enableAnger = true;
     bool enableDragAnimation = true;
-    bool pureScruffDrag = false; // lifting leaves keyboard & mouse on the desk
     bool isEnglish = false;
     bool isEditMode = false; // runtime-only interactive resize & rotate box
     bool petInteraction = true;
@@ -116,7 +115,6 @@ struct CatSettings {
                 else if (k == "whiteOutline") whiteOutline = (std::stoi(v) != 0);
                 else if (k == "enableAnger") enableAnger = (std::stoi(v) != 0);
                 else if (k == "enableDragAnimation") enableDragAnimation = (std::stoi(v) != 0);
-                else if (k == "pureScruffDrag") pureScruffDrag = (std::stoi(v) != 0);
                 else if (k == "isEnglish") isEnglish = (std::stoi(v) != 0);
                 else if (k == "petInteraction") petInteraction = (std::stoi(v) != 0);
                 else if (k == "fullClickThrough") fullClickThrough = (std::stoi(v) != 0);
@@ -165,7 +163,6 @@ struct CatSettings {
           << "whiteOutline=" << (whiteOutline ? 1 : 0) << "\n"
           << "enableAnger=" << (enableAnger ? 1 : 0) << "\n"
           << "enableDragAnimation=" << (enableDragAnimation ? 1 : 0) << "\n"
-          << "pureScruffDrag=" << (pureScruffDrag ? 1 : 0) << "\n"
           << "isEnglish=" << (isEnglish ? 1 : 0) << "\n"
           << "petInteraction=" << (petInteraction ? 1 : 0) << "\n"
           << "fullClickThrough=" << (fullClickThrough ? 1 : 0) << "\n"
@@ -311,14 +308,6 @@ public:
     Spring1D scruffSwing{0.0f};
     Spring1D scruffSwingY{0.0f};
     Spring1D scruffTailSwing{0.0f};
-    // Scruff-held pendulum: the cat hangs from the pinched nape like a real limp cat.
-    // Angles are world-space radians from straight down (+ = swings toward +x / canvas right).
-    float dangleAngle = 0.0f, dangleAngVel = 0.0f;       // whole body around the pinch
-    float dangleStretch = 0.0f, dangleStretchVel = 0.0f; // body length (-0.4 = curled up, + = stretched)
-    float dangleLeg = 0.0f, dangleLegVel = 0.0f;         // dangling legs (follow the body a beat late)
-    float dangleTailA = 0.0f, dangleTailAVel = 0.0f;     // tail base segment
-    float dangleTailB = 0.0f, dangleTailBVel = 0.0f;     // tail tip segment (whips after the base)
-    float dangleVx_ = 0.0f, dangleVy_ = 0.0f;            // smoothed pinch velocity (px/s)
     Spring1D lieIntensity{0.0f};
     Spring1D angerIntensity{0.0f};
     Spring1D dizzyIntensity{0.0f};
@@ -563,53 +552,6 @@ public:
         }
     }
 
-    // Pendulum for the scruff-held cat, driven by how the window (= the pinching hand) moves.
-    // dx/dy = canvas-space pixels the window moved since the last frame.
-    void stepDangle(float dt, float dx, float dy) {
-        dt = std::clamp(dt, 1.0f / 480.0f, 1.0f / 20.0f);
-        // Smooth the raw hand velocity so uneven mouse-event timing never jerks the cat.
-        float k = 1.0f - std::exp(-dt / 0.045f);
-        float nvx = dangleVx_ + (dx / dt - dangleVx_) * k;
-        float nvy = dangleVy_ + (dy / dt - dangleVy_) * k;
-        float dvx = std::clamp(nvx - dangleVx_, -900.0f, 900.0f);
-        float dvy = std::clamp(nvy - dangleVy_, -900.0f, 900.0f);
-        dangleVx_ = nvx; dangleVy_ = nvy;
-
-        constexpr float L = 190.0f;        // effective pendulum length (px)
-        constexpr float G = 6900.0f;       // gravity -> ~1.04 s swing period
-        constexpr float air = 1.35f;       // air drag: trails ~0.2 rad behind a 1000 px/s drag
-        constexpr float baseDamp = 0.55f;
-        // The hand's change in velocity kicks the body (pseudo-force in the hand's frame).
-        float c0 = std::cos(dangleAngle), s0 = std::sin(dangleAngle);
-        dangleAngVel += -(dvx * c0 - dvy * s0) / (L * 1.25f);
-        dangleStretchVel += -(dvx * s0 + dvy * c0) / 620.0f;
-
-        int n = std::max(1, (int)std::ceil(dt / (1.0f / 240.0f)));
-        float h = dt / (float)n;
-        float breathe = std::sin(time * 2.3f) * 0.012f;
-        for (int i = 0; i < n; ++i) {
-            float c = std::cos(dangleAngle), s = std::sin(dangleAngle);
-            float bobVx = dangleVx_ + L * dangleAngVel * c;
-            float acc = -(G / L) * s - air * bobVx * c / L - baseDamp * dangleAngVel;
-            float over = std::fabs(dangleAngle) - 0.80f;   // soft stop so a wild fling never flips the cat
-            if (over > 0.0f) acc -= std::copysign(over * 160.0f, dangleAngle) + dangleAngVel * 6.0f;
-            dangleAngVel += acc * h;
-            dangleAngle += dangleAngVel * h;
-
-            // Body length: springy stretch (curled -> hanging long), a touch of breathing.
-            dangleStretchVel += (-(150.0f) * (dangleStretch - breathe) - 7.8f * dangleStretchVel) * h;
-            dangleStretch = std::clamp(dangleStretch + dangleStretchVel * h, -0.45f, 0.14f);
-
-            // Limp legs hang a beat behind the body; tail base lags more, tail tip whips last.
-            dangleLegVel += (-(70.0f) * (dangleLeg - dangleAngle * 0.45f) - 3.4f * dangleLegVel) * h;
-            dangleLeg += dangleLegVel * h;
-            dangleTailAVel += (-(46.0f) * (dangleTailA - dangleAngle * 0.40f) - 2.4f * dangleTailAVel) * h;
-            dangleTailA += dangleTailAVel * h;
-            dangleTailBVel += (-(30.0f) * (dangleTailB - dangleTailA * 0.85f) - 1.9f * dangleTailBVel) * h;
-            dangleTailB += dangleTailBVel * h;
-        }
-    }
-
     void setDragging(bool dragging, float dragDx = 0.0f, float dragDy = 0.0f) {
         bool wasDragging = isScruffDragging_;
         isScruffDragging_ = dragging;
@@ -622,12 +564,6 @@ public:
                 scruffShakeDuration = 0.0f;
                 scruffShakeDir_ = { 0.0f, 0.0f };
                 scruffShakeLastReversal_ = -100.0f;
-                dangleAngle = 0.0f; dangleAngVel = 0.0f;
-                dangleStretch = -0.36f; dangleStretchVel = 0.0f;
-                dangleLeg = 0.0f; dangleLegVel = 0.0f;
-                dangleTailA = 0.0f; dangleTailAVel = 0.0f;
-                dangleTailB = 0.0f; dangleTailBVel = 0.0f;
-                dangleVx_ = 0.0f; dangleVy_ = 0.0f;
                 scruffStartedHoldingPen = isTabletActive && leftPawOnMouse;
                 scruffPenStartNib = tabletNib.point();
                 scruffPenStartAngle = stylusAngle();
@@ -848,7 +784,6 @@ public:
         if (isScruffDragging_) {
             scruffHoldTime += dt;
             scruffDropTimer = 0.0f;
-            stepDangle(dt, scruffDragAccumX_, scruffDragAccumY_);
             float frameScale = (1.0f / 60.0f) / std::max(dt, 1.0f / 120.0f);
             float instDx = scruffDragAccumX_ * frameScale;
             float instDy = scruffDragAccumY_ * frameScale;
@@ -877,7 +812,6 @@ public:
                 scruffShakeDuration = std::max(0.0f, scruffShakeDuration - dt * 1.4f);
             }
         } else {
-            if (scruffDrag.value > 0.005f) stepDangle(dt, 0.0f, 0.0f);
             scruffDropTimer = std::max(0.0f, scruffDropTimer - dt);
             if (scruffDrag.value < 0.02f) scruffHoldTime = 0.0f;
             if (scruffDrag.value < 0.005f) scruffStartedHoldingPen = false;
@@ -897,7 +831,7 @@ public:
         scruffSwing.target = isScruffDragging_ ? 0.92f * std::tanh(scruffDragDx_ / 18.0f) : 0.0f;
         scruffSwingY.target = isScruffDragging_ ? 0.78f * std::tanh(-scruffDragDy_ / 18.0f) : 0.0f;
         scruffTailSwing.target = isScruffDragging_ ? 1.22f * std::tanh(scruffDragDx_ / 16.0f) : 0.0f;
-        scruffDrag.step(dt, 80.0f, 14.5f);   // ~0.35 s lift-in / set-down so the seated <-> hanging cross-fade reads as motion
+        scruffDrag.step(dt, 190.0f, 17.0f);
         scruffSwing.step(dt, 92.0f, 7.4f);
         scruffSwingY.step(dt, 108.0f, 8.4f);
         scruffTailSwing.step(dt, 58.0f, 5.2f);
