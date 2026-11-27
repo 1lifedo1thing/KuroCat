@@ -62,7 +62,7 @@ using std::max;
 
 namespace {
 
-constexpr const wchar_t* APP_VERSION = L"1.5.2";
+constexpr const wchar_t* APP_VERSION = L"1.5.3";
 constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray owner window so newer builds can take over older ones
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
@@ -4918,6 +4918,10 @@ bool handleNativeSelfUpdateIfRequested() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    { // skins carrying a newer minAppVersion are refused with an upgrade hint
+        std::wstring v = APP_VERSION;
+        SkinSpec::appVersion.assign(v.begin(), v.end());
+    }
     // Enable best available DPI awareness (Per-Monitor V2 on Win10/11, Per-Monitor on Win8.1, System DPI on Win7)
     enableBestDpiAwareness();
 

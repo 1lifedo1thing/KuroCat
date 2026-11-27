@@ -35,7 +35,7 @@
 #include <fcntl.h>
 #include <glib-unix.h>
 
-#define KUROCAT_VERSION_STR "1.5.2"
+#define KUROCAT_VERSION_STR "1.5.3"
 static constexpr const char* APP_VERSION = KUROCAT_VERSION_STR;
 // Other KuroCat builds scan installed binaries for this marker (see readBinaryVersion) to find the
 // newest copy WITHOUT executing it. Always derived from KUROCAT_VERSION_STR.
@@ -3023,6 +3023,7 @@ static gboolean onWakeSignal(gpointer) {
 }
 
 int main(int argc, char** argv) {
+    SkinSpec::appVersion = APP_VERSION; // skins carrying a newer minAppVersion are refused with an upgrade hint
     if (argc > 1 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0)) {
         std::printf("KuroCat %s\n", APP_VERSION);
         return 0;
