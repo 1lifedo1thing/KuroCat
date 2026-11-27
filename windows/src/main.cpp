@@ -268,6 +268,9 @@ struct AppState {
     bool inContextMenu = false;
     POINT dragStartCursor = {};
     POINT dragStartWinOrigin = {};
+    POINT lastDragCursor = {};
+    float dragScruffDeltaX = 0.0f;
+    float dragScruffDeltaY = 0.0f;
     bool hasLastHover = false;
     Pt lastHoverCanvas = {};
     std::string statsDay;
@@ -4084,6 +4087,18 @@ void tickAndRender(AppState& app) {
     }
 
     // Smart Click-Through + Petting Detection
+    if (app.isDragging) {
+        POINT cur = {};
+        GetCursorPos(&cur);
+        float t = std::clamp(app.physics.scruffDrag.value, 0.0f, 1.0f);
+        float ease = t * t * (3.0f - 2.0f * t);
+        int nx = app.dragStartWinOrigin.x + (cur.x - app.dragStartCursor.x) + (int)std::lround(app.dragScruffDeltaX * ease);
+        int ny = app.dragStartWinOrigin.y + (cur.y - app.dragStartCursor.y) + (int)std::lround(app.dragScruffDeltaY * ease);
+        if (nx != wr.left || ny != wr.top) {
+            SetWindowPos(app.hwnd, nullptr, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            GetWindowRect(app.hwnd, &wr);
+        }
+    }
     if (!app.isDragging && app.activeResizeCorner < 0 && !app.isRotating) {
         POINT cur = {};
         GetCursorPos(&cur);
@@ -4427,7 +4442,17 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->isDragging = true;
                 app->dragMouseButton = 1;
                 app->dragStartCursor = cur;
+                app->lastDragCursor = cur;
                 app->dragStartWinOrigin = { wr.left, wr.top };
+                if (app->settings.enableDragAnimation) {
+                    Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*app), app->settings.flipHorizontal, app->settings.rotationDeg);
+                    float sc = (float)std::max(1L, wr.right - wr.left) / CatPhysics::CanvasWidth;
+                    app->dragScruffDeltaX = (float)cur.x - pinch.x * sc - (float)wr.left;
+                    app->dragScruffDeltaY = (float)cur.y - pinch.y * sc - (float)wr.top;
+                } else {
+                    app->dragScruffDeltaX = 0.0f;
+                    app->dragScruffDeltaY = 0.0f;
+                }
                 app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
                 SetCapture(hwnd);
             }
@@ -4494,7 +4519,17 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     app->isDragging = true;
                     app->dragMouseButton = 2;
                     app->dragStartCursor = app->rButtonDownCursor;
+                    app->lastDragCursor = cur;
                     app->dragStartWinOrigin = { wr.left, wr.top };
+                    if (app->settings.enableDragAnimation) {
+                        Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*app), app->settings.flipHorizontal, app->settings.rotationDeg);
+                        float sc = (float)std::max(1L, wr.right - wr.left) / CatPhysics::CanvasWidth;
+                        app->dragScruffDeltaX = (float)app->rButtonDownCursor.x - pinch.x * sc - (float)wr.left;
+                        app->dragScruffDeltaY = (float)app->rButtonDownCursor.y - pinch.y * sc - (float)wr.top;
+                    } else {
+                        app->dragScruffDeltaX = 0.0f;
+                        app->dragScruffDeltaY = 0.0f;
+                    }
                     app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
                 }
             }
@@ -4505,6 +4540,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (!activeBtnDown) {
                     app->isDragging = false;
                     app->dragMouseButton = 0;
+                    app->dragScruffDeltaX = 0.0f;
+                    app->dragScruffDeltaY = 0.0f;
                     app->physics.setDragging(false);
                     if (GetCapture() == hwnd) ReleaseCapture();
                     RECT wr = {};
@@ -4517,12 +4554,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 POINT cur = {};
                 GetCursorPos(&cur);
-                RECT wr = {};
-                GetWindowRect(hwnd, &wr);
-                int nx = app->dragStartWinOrigin.x + (cur.x - app->dragStartCursor.x);
-                int ny = app->dragStartWinOrigin.y + (cur.y - app->dragStartCursor.y);
-                float stepDx = (float)(nx - wr.left);
-                float stepDy = (float)(ny - wr.top);
+                float t = std::clamp(app->physics.scruffDrag.value, 0.0f, 1.0f);
+                float ease = t * t * (3.0f - 2.0f * t);
+                int nx = app->dragStartWinOrigin.x + (cur.x - app->dragStartCursor.x) + (int)std::lround(app->dragScruffDeltaX * ease);
+                int ny = app->dragStartWinOrigin.y + (cur.y - app->dragStartCursor.y) + (int)std::lround(app->dragScruffDeltaY * ease);
+                float stepDx = (float)(cur.x - app->lastDragCursor.x);
+                float stepDy = (float)(cur.y - app->lastDragCursor.y);
+                app->lastDragCursor = cur;
                 float rad = -app->settings.rotationDeg * (3.14159265f / 180.0f);
                 float c = std::cos(rad), s = std::sin(rad);
                 float localDx = stepDx * c - stepDy * s;

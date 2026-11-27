@@ -295,6 +295,30 @@ public:
         return pt;
     }
 
+    static Pt scruffPinchCanvasPoint(const SkinSpec& skin, bool flipped, float rotationDeg) {
+        Pt pt = { 180.0f, 58.0f };
+        if (skin.renderStyle != SkinRenderStyle::Beagle) {
+            float hs = skin.shape.headScale;
+            const CoatBuild& bd = buildOf(skin);
+            pt.y = 82.0f + (hs - 1.0f) * 6.0f + bd.crownBaseY * hs - 6.2f * hs;
+        }
+        if (flipped) {
+            pt.x = CatPhysics::CanvasWidth - pt.x;
+        }
+        if (std::fabs(rotationDeg) > 0.01f) {
+            constexpr float cx = CatPhysics::CanvasWidth * 0.5f;
+            constexpr float cy = CatPhysics::CanvasHeight * 0.5f;
+            float rad = rotationDeg * (3.14159265f / 180.0f);
+            float fit = std::max(0.5f, 1.0f - std::fabs(std::sin(rad)) * 0.14f);
+            float dx = (pt.x - cx) * fit;
+            float dy = (pt.y - cy) * fit;
+            float c = std::cos(rad);
+            float s = std::sin(rad);
+            pt = { cx + dx * c - dy * s, cy + dx * s + dy * c };
+        }
+        return pt;
+    }
+
     /// Edit-mode hit test in unflipped 360x320 canvas coordinates:
     /// 20 = top rotation handle, 0..3 = corner resize handles, 12 = inside edit box, -1 = outside.
     static int hitTestEditOverlay(Pt p) {
@@ -787,16 +811,42 @@ private:
         if (mark.brush == SkinBrush::Airbrush) {
             double radius = std::max(2.2, baseW * 1.15);
             double stepDist = std::max(1.4, radius * 0.34);
+            auto getAirbrushStamp = [](const SkinColor& col) -> cairo_surface_t* {
+                static std::unordered_map<uint32_t, cairo_surface_t*> cache;
+                auto b = [](float v) -> uint32_t {
+                    int n = (int)std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+                    return (uint32_t)std::clamp(n, 0, 255);
+                };
+                uint32_t key = (b(col.a) << 24) | (b(col.r) << 16) | (b(col.g) << 8) | b(col.b);
+                auto it = cache.find(key);
+                if (it != cache.end()) return it->second;
+                if (cache.size() >= 256) {
+                    for (auto& kv : cache) cairo_surface_destroy(kv.second);
+                    cache.clear();
+                }
+                cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 64, 64);
+                cairo_t* sctx = cairo_create(surf);
+                cairo_pattern_t* pat = cairo_pattern_create_radial(32.0, 32.0, 0.0, 32.0, 32.0, 29.5);
+                cairo_pattern_add_color_stop_rgba(pat, 0.0, col.r, col.g, col.b, col.a * 0.34);
+                cairo_pattern_add_color_stop_rgba(pat, 0.45, col.r, col.g, col.b, col.a * 0.16);
+                cairo_pattern_add_color_stop_rgba(pat, 1.0, col.r, col.g, col.b, 0.0);
+                cairo_set_source(sctx, pat);
+                cairo_paint(sctx);
+                cairo_pattern_destroy(pat);
+                cairo_destroy(sctx);
+                cache.emplace(key, surf);
+                return surf;
+            };
+            cairo_surface_t* stampSurf = getAirbrushStamp(mark.color);
+            double drawScale = radius / 29.5;
             auto stamp = [&](double x, double y) {
-                cairo_pattern_t* pat = detail::CairoPatternCache::instance().getRadial(x, y, 0.0, x, y, radius, {
-                    {0.0, mark.color.r, mark.color.g, mark.color.b, mark.color.a * 0.34},
-                    {0.45, mark.color.r, mark.color.g, mark.color.b, mark.color.a * 0.16},
-                    {1.0, mark.color.r, mark.color.g, mark.color.b, 0.0}
-                });
-                cairo_set_source(cr, pat);
-                cairo_new_path(cr);
-                cairo_arc(cr, x, y, radius, 0.0, 2.0 * M_PI);
-                cairo_fill(cr);
+                cairo_save(cr);
+                cairo_translate(cr, x, y);
+                cairo_scale(cr, drawScale, drawScale);
+                cairo_set_source_surface(cr, stampSurf, -32.0, -32.0);
+                cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+                cairo_paint(cr);
+                cairo_restore(cr);
             };
             if (mapped.size() == 1) {
                 stamp(mapped[0].x, mapped[0].y);

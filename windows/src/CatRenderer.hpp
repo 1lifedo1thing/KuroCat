@@ -300,6 +300,30 @@ public:
         return pt;
     }
 
+    static Pt scruffPinchCanvasPoint(const SkinSpec& skin, bool flipped, float rotationDeg) {
+        Pt pt = { 180.0f, 58.0f };
+        if (skin.renderStyle != SkinRenderStyle::Beagle) {
+            float hs = skin.shape.headScale;
+            const CoatBuild& bd = buildOf(skin);
+            pt.y = 82.0f + (hs - 1.0f) * 6.0f + bd.crownBaseY * hs - 6.2f * hs;
+        }
+        if (flipped) {
+            pt.x = CatPhysics::CanvasWidth - pt.x;
+        }
+        if (std::fabs(rotationDeg) > 0.01f) {
+            constexpr float cx = CatPhysics::CanvasWidth * 0.5f;
+            constexpr float cy = CatPhysics::CanvasHeight * 0.5f;
+            float rad = rotationDeg * (3.14159265f / 180.0f);
+            float fit = std::max(0.5f, 1.0f - std::fabs(std::sin(rad)) * 0.14f);
+            float dx = (pt.x - cx) * fit;
+            float dy = (pt.y - cy) * fit;
+            float c = std::cos(rad);
+            float s = std::sin(rad);
+            pt = { cx + dx * c - dy * s, cy + dx * s + dy * c };
+        }
+        return pt;
+    }
+
     /// Edit-mode hit test in unflipped 360x320 canvas coordinates:
     /// 20 = top rotation handle, 0..3 = corner resize handles, 12 = inside edit box, -1 = outside.
     static int hitTestEditOverlay(Pt p) {
@@ -841,7 +865,7 @@ private:
             const auto& px = airbrushStampPixels(mark.color);
             Bitmap stampBmp(64, 64, 64 * 4, PixelFormat32bppPARGB, const_cast<BYTE*>(px.data()));
             GraphicsState st = g.Save();
-            g.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+            g.SetInterpolationMode(InterpolationModeBilinear);
             g.SetPixelOffsetMode(PixelOffsetModeHalf);
             auto stamp = [&](float x, float y) {
                 g.DrawImage(&stampBmp, RectF(x - drawR, y - drawR, drawR * 2.0f, drawR * 2.0f),

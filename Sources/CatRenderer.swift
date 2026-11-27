@@ -140,6 +140,32 @@ enum CatRenderer {
         return CGPoint(x: x, y: y)
     }
 
+    /// Inverse of `canvasPointToCatSpace`, returning the lifted scruff-pinch anchor in 360x320 canvas coordinates.
+    static func scruffPinchCanvasPoint(skin: SkinSpec, flipped: Bool, rotationDeg: CGFloat) -> CGPoint {
+        var x: CGFloat = 180.0
+        var y: CGFloat
+        if skin.renderStyle == .beagle {
+            y = 58.0
+        } else {
+            let hs = skin.shape.headScale
+            let bd = build(skin)
+            y = 82.0 + (hs - 1.0) * 6.0 + bd.crownBaseY * hs - 6.2 * hs
+        }
+        if flipped {
+            x = CatPhysics.canvasSize.width - x
+        }
+        if abs(rotationDeg) > 0.05 {
+            let rad = rotationDeg * .pi / 180.0
+            let fitScale = 1.0 - abs(sin(rad)) * 0.14
+            let dx = (x - 180.0) * fitScale
+            let dy = (y - 160.0) * fitScale
+            let c = cos(rad), s = sin(rad)
+            x = 180.0 + dx * c - dy * s
+            y = 160.0 + dx * s + dy * c
+        }
+        return CGPoint(x: x, y: y)
+    }
+
     /// Edit-mode hit test in unflipped 360x320 canvas coordinates:
     /// 0..3 = corner resize handles, 20 = top rotation/direction handle, 12 = inside edit box, -1 = outside.
     static func hitTestEditOverlay(point p: CGPoint) -> Int {
@@ -2116,6 +2142,36 @@ enum CatRenderer {
         if closed { path.closeSubpath() }
         return path
     }
+    private static var airbrushStampCache: [UInt64: CGImage] = [:]
+
+    private static func airbrushStampImage(color: SkinColor, srgb: Bool) -> CGImage? {
+        let r8 = UInt64(max(0, min(255, Int((color.r * 255.0).rounded()))))
+        let g8 = UInt64(max(0, min(255, Int((color.g * 255.0).rounded()))))
+        let b8 = UInt64(max(0, min(255, Int((color.b * 255.0).rounded()))))
+        let a8 = UInt64(max(0, min(255, Int((color.a * 255.0).rounded()))))
+        let key: UInt64 = (srgb ? (1 << 32) : 0) | (a8 << 24) | (r8 << 16) | (g8 << 8) | b8
+        if let cached = airbrushStampCache[key] { return cached }
+        if airbrushStampCache.count >= 256 { airbrushStampCache.removeAll(keepingCapacity: true) }
+        let cs = srgb ? srgbColorSpace : rgbColorSpace
+        guard let bctx = CGContext(
+            data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 64 * 4,
+            space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        let r = color.r, g = color.g, b = color.b, a = color.a
+        let colors: [CGColor] = [
+            CGColor(colorSpace: cs, components: [r, g, b, a * 0.34])!,
+            CGColor(colorSpace: cs, components: [r, g, b, a * 0.16])!,
+            CGColor(colorSpace: cs, components: [r, g, b, 0.0])!
+        ]
+        if let grad = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: [0.0, 0.45, 1.0]) {
+            let center = CGPoint(x: 32.0, y: 32.0)
+            bctx.drawRadialGradient(grad, startCenter: center, startRadius: 0, endCenter: center, endRadius: 29.5, options: [])
+        }
+        guard let img = bctx.makeImage() else { return nil }
+        airbrushStampCache[key] = img
+        return img
+    }
+
     /// Strokes get round caps, except tail-space strokes (bands around the tail) which are cut flat.
     private static func drawMark(in ctx: CGContext, _ mark: SkinMark, cap: CGLineCap = .round, srgb: Bool = false, map: (CGPoint) -> CGPoint) {
         guard !mark.points.isEmpty else { return }
@@ -2150,17 +2206,10 @@ enum CatRenderer {
         if mark.brush == .airbrush {
             let radius = max(2.2, baseW * 1.15)
             let stepDist = max(1.4, radius * 0.34)
-            let cs = srgb ? srgbColorSpace : rgbColorSpace
-            let r = mark.color.r, g = mark.color.g, b = mark.color.b, a = mark.color.a
-            let colors: [CGColor] = [
-                CGColor(colorSpace: cs, components: [r, g, b, a * 0.34])!,
-                CGColor(colorSpace: cs, components: [r, g, b, a * 0.16])!,
-                CGColor(colorSpace: cs, components: [r, g, b, 0.0])!
-            ]
-            let locs: [CGFloat] = [0.0, 0.45, 1.0]
-            if let grad = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: locs) {
+            let drawR = radius * (32.0 / 29.5)
+            if let stampImg = airbrushStampImage(color: mark.color, srgb: srgb) {
                 let stamp: (CGPoint) -> Void = { pt in
-                    ctx.drawRadialGradient(grad, startCenter: pt, startRadius: 0, endCenter: pt, endRadius: radius, options: [])
+                    ctx.draw(stampImg, in: CGRect(x: pt.x - drawR, y: pt.y - drawR, width: drawR * 2.0, height: drawR * 2.0))
                 }
                 if mapped.count == 1 {
                     stamp(mapped[0])

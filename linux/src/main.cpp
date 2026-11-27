@@ -118,6 +118,7 @@ struct LinuxApp {
     double lastDragRootX = 0.0;
     double lastDragRootY = 0.0;
     int dragStartWinX = 0, dragStartWinY = 0;
+    double dragScruffDeltaX = 0.0, dragScruffDeltaY = 0.0;
     bool hasSavedObsPos = false;
     int savedObsPosX = 0, savedObsPosY = 0;
 
@@ -2425,6 +2426,17 @@ static gboolean onButtonPress(GtkWidget*, GdkEventButton* evt, gpointer) {
         g_app->lastDragRootX = evt->x_root;
         g_app->lastDragRootY = evt->y_root;
         gtk_window_get_position(GTK_WINDOW(g_app->window), &g_app->dragStartWinX, &g_app->dragStartWinY);
+        if (g_app->settings.enableDragAnimation) {
+            int ww = 0, wh = 0;
+            gtk_window_get_size(GTK_WINDOW(g_app->window), &ww, &wh);
+            Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*g_app), g_app->settings.flipHorizontal, g_app->settings.rotationDeg);
+            double sc = (double)std::max(1, ww) / (double)CatPhysics::CanvasWidth;
+            g_app->dragScruffDeltaX = evt->x_root - (double)pinch.x * sc - (double)g_app->dragStartWinX;
+            g_app->dragScruffDeltaY = evt->y_root - (double)pinch.y * sc - (double)g_app->dragStartWinY;
+        } else {
+            g_app->dragScruffDeltaX = 0.0;
+            g_app->dragScruffDeltaY = 0.0;
+        }
         g_app->physics.setDragging(g_app->settings.enableDragAnimation, 0.0f, 0.0f);
         return TRUE;
     }
@@ -2472,8 +2484,10 @@ static gboolean onMotionNotify(GtkWidget*, GdkEventMotion* evt, gpointer) {
         return TRUE;
     }
     if (g_app->isDragging) {
-        int nx = g_app->dragStartWinX + (int)std::round(evt->x_root - g_app->dragStartRootX);
-        int ny = g_app->dragStartWinY + (int)std::round(evt->y_root - g_app->dragStartRootY);
+        double t = std::clamp((double)g_app->physics.scruffDrag.value, 0.0, 1.0);
+        double ease = t * t * (3.0 - 2.0 * t);
+        int nx = g_app->dragStartWinX + (int)std::round((evt->x_root - g_app->dragStartRootX) + g_app->dragScruffDeltaX * ease);
+        int ny = g_app->dragStartWinY + (int)std::round((evt->y_root - g_app->dragStartRootY) + g_app->dragScruffDeltaY * ease);
         float dx = (float)(evt->x_root - g_app->lastDragRootX);
         float dy = (float)(evt->y_root - g_app->lastDragRootY);
         g_app->lastDragRootX = evt->x_root;
@@ -2896,6 +2910,15 @@ static gboolean onFrameTick(gpointer) {
     for (int i = 0; i < substeps; ++i) {
         g_app->physics.step(dt / (float)substeps, (float)winX, (float)winY, (float)winW,
                             g_app->input, g_app->settings, curSkin.typingStyle, curSkin.renderStyle, isClassicBuiltIn);
+    }
+    if (g_app->isDragging && (std::fabs(g_app->dragScruffDeltaX) > 0.5 || std::fabs(g_app->dragScruffDeltaY) > 0.5)) {
+        double t = std::clamp((double)g_app->physics.scruffDrag.value, 0.0, 1.0);
+        double ease = t * t * (3.0 - 2.0 * t);
+        int nx = g_app->dragStartWinX + (int)std::round((g_app->lastDragRootX - g_app->dragStartRootX) + g_app->dragScruffDeltaX * ease);
+        int ny = g_app->dragStartWinY + (int)std::round((g_app->lastDragRootY - g_app->dragStartRootY) + g_app->dragScruffDeltaY * ease);
+        if (nx != winX || ny != winY) {
+            gtk_window_move(GTK_WINDOW(g_app->window), nx, ny);
+        }
     }
 
     // Idle dirty-check: skip gtk_widget_queue_draw when completely static to achieve 0fps idle redraw.
