@@ -1802,37 +1802,20 @@ enum CatRenderer {
     private static var bodyGeometryCache: [BodyGeometryKey: BodyGeometryEntry] = [:]
 
     private struct HeadBakedKey: Hashable {
-        let skinId: String
-        let srgb: Bool
-        let isDome: Bool
-        let regionCount: Int
-        let markCount: Int
-        let qYaw: CGFloat
-        let qPitch: CGFloat
-        let qCoverage: CGFloat
+        let geoKey: HeadGeometryKey
         let rasterScale: CGFloat
         let coverageActive: Bool
-    }
-    private struct BodyBakedKey: Hashable {
-        let skinId: String
-        let srgb: Bool
-        let bodyWidth: CGFloat
-        let regionCount: Int
-        let markCount: Int
-        let rasterScale: CGFloat
     }
     private struct BakedTexture {
         let image: CGImage
         let bounds: CGRect
     }
     private static var headMarksBakedCache: [HeadBakedKey: BakedTexture] = [:]
-    private static var bodyMarksBakedCache: [BodyBakedKey: BakedTexture] = [:]
 
     static func purgeVolatileCaches() {
         marqueeCycleCache = nil
         marqueeGradientCache.removeAll(keepingCapacity: false)
         headMarksBakedCache.removeAll(keepingCapacity: false)
-        bodyMarksBakedCache.removeAll(keepingCapacity: false)
         partHeadDomeCache.removeAll(keepingCapacity: false)
         partHeadDomeOrder.removeAll(keepingCapacity: false)
     }
@@ -2216,30 +2199,20 @@ enum CatRenderer {
 
     private static func cachedHeadBakedMarks(
         skin: SkinSpec,
-        yaw: CGFloat,
-        pitch: CGFloat,
-        coverage: CGFloat,
+        headGeo: HeadGeometryEntry,
+        headTx: HeadTransform,
+        geoKey: HeadGeometryKey,
         rasterScale: CGFloat,
         coverageActive: Bool,
         srgb: Bool
     ) -> BakedTexture? {
-        guard !skin.id.isEmpty else { return nil }
-        let qYaw = (yaw * 16).rounded() / 16
-        let qPitch = (pitch * 16).rounded() / 16
-        let qCoverage = (coverage * 16).rounded() / 16
         let qScale = max(1.0, min(3.0, (rasterScale * 2.0).rounded() / 2.0))
-        let isDome = skin.headSurface == .dome
-        let key = HeadBakedKey(
-            skinId: skin.id, srgb: srgb, isDome: isDome,
-            regionCount: skin.regions.count, markCount: skin.marks.count,
-            qYaw: qYaw, qPitch: qPitch, qCoverage: qCoverage,
-            rasterScale: qScale, coverageActive: coverageActive
-        )
+        let key = HeadBakedKey(geoKey: geoKey, rasterScale: qScale, coverageActive: coverageActive)
         if let hit = headMarksBakedCache[key] { return hit }
-        if headMarksBakedCache.count >= 48 {
+        if headMarksBakedCache.count >= 8 {
             headMarksBakedCache.removeAll(keepingCapacity: true)
         }
-        let bounds = CGRect(x: -120, y: -120, width: 240, height: 240)
+        let bounds = CGRect(x: -100, y: -100, width: 200, height: 200)
         let pxW = max(1, Int((bounds.width * qScale).rounded()))
         let pxH = max(1, Int((bounds.height * qScale).rounded()))
         let cs = srgb ? srgbColorSpace : rgbColorSpace
@@ -2253,66 +2226,36 @@ enum CatRenderer {
         bctx.scaleBy(x: qScale, y: -qScale)
         bctx.translateBy(x: -bounds.minX, y: -bounds.minY)
 
-        // Bake un-tilted, un-scaled 3D head projection so headTilt & headScale stay 100% cache hits
-        let unitHeadTx = HeadTransform(yaw: qYaw, pitch: qPitch, tilt: 0, headScale: 1.0, isDome: isDome)
         for region in skin.regions where region.space == .head || region.space == .skull {
             drawRegion(in: bctx, region, srgb: srgb) { p in
-                unitHeadTx.mapRelative(p, skull: region.space == .skull)
+                headTx.mapRelative(p, skull: region.space == .skull)
             }
         }
-        for mark in skin.marks where mark.space == .head || mark.space == .skull {
+        for (idx, mark) in skin.marks.enumerated() where mark.space == .head || mark.space == .skull {
             if mark.clipToBib && !coverageActive { continue }
-            let isSkull = (mark.space == .skull)
-            drawMark(in: bctx, mark, srgb: srgb) { p in
-                unitHeadTx.mapRelative(p, skull: isSkull)
+            let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
+            if needsBrushRender {
+                drawMark(in: bctx, mark, srgb: srgb) { p in
+                    headTx.mapRelative(p, skull: mark.space == .skull)
+                }
+            } else if let mPath = headGeo.markPaths[idx], let mColor = headGeo.markColors[idx] {
+                if !mark.stroke {
+                    bctx.setFillColor(mColor)
+                    bctx.addPath(mPath)
+                    bctx.fillPath()
+                } else {
+                    bctx.setStrokeColor(mColor)
+                    bctx.setLineWidth(mark.width)
+                    bctx.setLineCap(.round)
+                    bctx.setLineJoin(.round)
+                    bctx.addPath(mPath)
+                    bctx.strokePath()
+                }
             }
         }
         guard let img = bctx.makeImage() else { return nil }
         let entry = BakedTexture(image: img, bounds: bounds)
         headMarksBakedCache[key] = entry
-        return entry
-    }
-
-    private static func cachedBodyBakedMarks(
-        skin: SkinSpec,
-        rasterScale: CGFloat,
-        srgb: Bool
-    ) -> BakedTexture? {
-        guard !skin.id.isEmpty else { return nil }
-        let qScale = max(1.0, min(3.0, (rasterScale * 2.0).rounded() / 2.0))
-        let key = BodyBakedKey(
-            skinId: skin.id, srgb: srgb, bodyWidth: skin.shape.bodyWidth,
-            regionCount: skin.regions.count, markCount: skin.marks.count,
-            rasterScale: qScale
-        )
-        if let hit = bodyMarksBakedCache[key] { return hit }
-        if bodyMarksBakedCache.count >= 24 {
-            bodyMarksBakedCache.removeAll(keepingCapacity: true)
-        }
-        let bounds = CGRect(x: -140, y: -140, width: 280, height: 280)
-        let pxW = max(1, Int((bounds.width * qScale).rounded()))
-        let pxH = max(1, Int((bounds.height * qScale).rounded()))
-        let cs = srgb ? srgbColorSpace : rgbColorSpace
-        guard let bctx = CGContext(
-            data: nil, width: pxW, height: pxH, bitsPerComponent: 8, bytesPerRow: pxW * 4, space: cs,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-        bctx.setAllowsAntialiasing(true)
-        bctx.setShouldAntialias(true)
-        bctx.translateBy(x: 0, y: CGFloat(pxH))
-        bctx.scaleBy(x: qScale, y: -qScale)
-        bctx.translateBy(x: -bounds.minX, y: -bounds.minY)
-
-        let bw = skin.shape.bodyWidth
-        for region in skin.regions where region.space == .body {
-            drawRegion(in: bctx, region, srgb: srgb) { p in CGPoint(x: p.x * bw, y: p.y) }
-        }
-        for mark in skin.marks where mark.space == .body {
-            drawMark(in: bctx, mark, srgb: srgb) { p in CGPoint(x: p.x * bw, y: p.y) }
-        }
-        guard let img = bctx.makeImage() else { return nil }
-        let entry = BakedTexture(image: img, bounds: bounds)
-        bodyMarksBakedCache[key] = entry
         return entry
     }
 
@@ -3564,50 +3507,36 @@ enum CatRenderer {
             }
 
             if let headGeo {
-                let hasBodyArt = skin.regions.contains { $0.space == .body } || skin.marks.contains { $0.space == .body }
-                let hasHeadArt = skin.regions.contains { $0.space == .head || $0.space == .skull } || skin.marks.contains { $0.space == .head || $0.space == .skull }
-                let hasHeavyBrush = skin.marks.contains { $0.stroke && $0.brush != .round }
-                let hasSpecialHeadClip = skin.marks.contains { ($0.space == .head || $0.space == .skull) && shouldSkipJawHeadClip($0) }
-                let shouldBakeCustom = !skin.builtIn && (hasHeavyBrush || (skin.regions.count + skin.marks.count >= 8))
+                let needsBodyGeo = skin.regions.contains { $0.space == .body } || skin.marks.contains { $0.space == .body }
+                let bodyGeo: BodyGeometryEntry? = needsBodyGeo
+                    ? cachedBodyGeometry(skin: skin, bodySquash: physics.bodySquash.value, lieIntensity: physics.lieIntensity.value, bodyTilt: bTilt)
+                    : nil
 
-                let isDome = skin.headSurface == .dome
-                let headTx = HeadTransform(yaw: yaw, pitch: pitch, tilt: hTilt, headScale: skin.shape.headScale, isDome: isDome)
-                let bodyTx = BodyTransform(bodyWidth: skin.shape.bodyWidth, bodySquash: physics.bodySquash.value, lieIntensity: lie, bodyTilt: bTilt)
-                let rScale = currentRasterScale(in: ctx).width
-
-                var usedBakedBody = false
-                if hasBodyArt && shouldBakeCustom,
-                   let jawBodyPath = headGeo.jawBodyPath,
-                   let bakedBody = cachedBodyBakedMarks(skin: skin, rasterScale: rScale, srgb: srgb) {
+                // Curve regions: body regions below jawline first, then skull/head regions above jawline.
+                if let bodyGeo, !bodyGeo.bodyRegions.isEmpty, let jawBodyPath = headGeo.jawBodyPath {
                     ctx.saveGState()
                     ctx.translateBy(x: headCenter.x, y: headCenter.y)
                     ctx.addPath(jawBodyPath)
                     ctx.clip()
                     ctx.translateBy(x: seatX - headCenter.x, y: seatY - headCenter.y)
-                    ctx.rotate(by: bTilt)
-                    ctx.scaleBy(x: bodyTx.sxUnit, y: bodyTx.sy)
-                    ctx.translateBy(x: 0, y: bakedBody.bounds.maxY + bakedBody.bounds.minY)
-                    ctx.scaleBy(x: 1, y: -1)
-                    ctx.draw(bakedBody.image, in: bakedBody.bounds)
+                    for item in bodyGeo.bodyRegions {
+                        ctx.setFillColor(item.color)
+                        ctx.addPath(item.path)
+                        ctx.fillPath()
+                    }
                     ctx.restoreGState()
-                    usedBakedBody = true
                 }
-
-                var usedBakedHead = false
-                if hasHeadArt && !hasSpecialHeadClip && (shouldBakeCustom || skin.marks.count >= 16),
-                   let jawHeadPath = headGeo.jawHeadPath,
-                   let bakedHead = cachedHeadBakedMarks(skin: skin, yaw: yaw, pitch: pitch, coverage: coverage, rasterScale: rScale, coverageActive: coverage > 0, srgb: srgb) {
+                if !headGeo.headRegions.isEmpty, let jawHeadPath = headGeo.jawHeadPath {
                     ctx.saveGState()
                     ctx.translateBy(x: headCenter.x, y: headCenter.y)
                     ctx.addPath(jawHeadPath)
                     ctx.clip()
-                    ctx.rotate(by: hTilt)
-                    if hs != 1 { ctx.scaleBy(x: hs, y: hs) }
-                    ctx.translateBy(x: 0, y: bakedHead.bounds.maxY + bakedHead.bounds.minY)
-                    ctx.scaleBy(x: 1, y: -1)
-                    ctx.draw(bakedHead.image, in: bakedHead.bounds)
+                    for item in headGeo.headRegions {
+                        ctx.setFillColor(item.color)
+                        ctx.addPath(item.path)
+                        ctx.fillPath()
+                    }
                     ctx.restoreGState()
-                    usedBakedHead = true
                 }
 
                 func drawCachedMark(path: CGPath, color: CGColor, stroke: Bool, width: CGFloat) {
@@ -3625,48 +3554,66 @@ enum CatRenderer {
                     }
                 }
 
-                if hasBodyArt && !usedBakedBody {
-                    let bodyGeo = cachedBodyGeometry(skin: skin, bodySquash: physics.bodySquash.value, lieIntensity: physics.lieIntensity.value, bodyTilt: bTilt)
-                    if let jawBodyPath = headGeo.jawBodyPath {
+                let isDome = skin.headSurface == .dome
+                let headTx = HeadTransform(yaw: yaw, pitch: pitch, tilt: hTilt, headScale: skin.shape.headScale, isDome: isDome)
+                let bodyTx = BodyTransform(bodyWidth: skin.shape.bodyWidth, bodySquash: physics.bodySquash.value, lieIntensity: lie, bodyTilt: bTilt)
+
+                var usedBakedHeadMarks = false
+                if skin.marks.count >= 16 {
+                    let qYaw = (yaw * 40).rounded() / 40
+                    let qPitch = (pitch * 40).rounded() / 40
+                    let qTilt = (hTilt * 40).rounded() / 40
+                    let qKey = HeadGeometryKey(
+                        skinId: skin.id, srgb: srgb, headScale: skin.shape.headScale,
+                        cheekFullness: skin.shape.cheekFullness, isDome: isDome,
+                        regionCount: skin.regions.count, markCount: skin.marks.count,
+                        yaw: qYaw, pitch: qPitch, tilt: qTilt,
+                        coverage: (coverage * 20).rounded() / 20
+                    )
+                    if let baked = cachedHeadBakedMarks(
+                        skin: skin, headGeo: headGeo, headTx: headTx,
+                        geoKey: qKey, rasterScale: currentRasterScale(in: ctx).width,
+                        coverageActive: coverage > 0, srgb: srgb
+                    ) {
                         ctx.saveGState()
                         ctx.translateBy(x: headCenter.x, y: headCenter.y)
-                        ctx.addPath(jawBodyPath)
-                        ctx.clip()
-                        ctx.translateBy(x: seatX - headCenter.x, y: seatY - headCenter.y)
-                        for item in bodyGeo.bodyRegions {
-                            ctx.setFillColor(item.color)
-                            ctx.addPath(item.path)
-                            ctx.fillPath()
+                        if let jawHeadPath = headGeo.jawHeadPath {
+                            ctx.addPath(jawHeadPath)
+                            ctx.clip()
                         }
-                        for (idx, mark) in skin.marks.enumerated() where mark.space == .body {
-                            let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
-                            if needsBrushRender {
-                                drawMark(in: ctx, mark, srgb: srgb, map: { bodyTx.mapRelative($0) })
-                            } else if let mPath = bodyGeo.markPaths[idx], let mColor = bodyGeo.markColors[idx] {
-                                drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
-                            }
-                        }
+                        ctx.translateBy(x: 0, y: baked.bounds.maxY + baked.bounds.minY)
+                        ctx.scaleBy(x: 1, y: -1)
+                        ctx.draw(baked.image, in: baked.bounds)
                         ctx.restoreGState()
+                        usedBakedHeadMarks = true
                     }
                 }
 
-                if hasHeadArt && !usedBakedHead {
-                    if !headGeo.headRegions.isEmpty, let jawHeadPath = headGeo.jawHeadPath {
-                        ctx.saveGState()
-                        ctx.translateBy(x: headCenter.x, y: headCenter.y)
-                        ctx.addPath(jawHeadPath)
-                        ctx.clip()
-                        for item in headGeo.headRegions {
-                            ctx.setFillColor(item.color)
-                            ctx.addPath(item.path)
-                            ctx.fillPath()
+                for (idx, mark) in skin.marks.enumerated() {
+                    if mark.clipToBib && coverage == 0 { continue }
+                    let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
+                    switch mark.space {
+                    case .body:
+                        if let bodyGeo,
+                           let jawBodyPath = headGeo.jawBodyPath,
+                           let mPath = bodyGeo.markPaths[idx],
+                           let mColor = bodyGeo.markColors[idx] {
+                            ctx.saveGState()
+                            ctx.translateBy(x: headCenter.x, y: headCenter.y)
+                            ctx.addPath(jawBodyPath)
+                            ctx.clip()
+                            ctx.translateBy(x: seatX - headCenter.x, y: seatY - headCenter.y)
+                            if needsBrushRender {
+                                drawMark(in: ctx, mark, srgb: srgb, map: { bodyTx.mapRelative($0) })
+                            } else {
+                                drawCachedMark(path: mPath, color: mColor, stroke: mark.stroke, width: mark.width)
+                            }
+                            ctx.restoreGState()
                         }
-                        ctx.restoreGState()
-                    }
-                    for (idx, mark) in skin.marks.enumerated() where mark.space == .head || mark.space == .skull {
-                        if mark.clipToBib && coverage == 0 { continue }
-                        let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
-                        if let mPath = headGeo.markPaths[idx], let mColor = headGeo.markColors[idx] {
+                    case .skull, .head:
+                        if usedBakedHeadMarks { break }
+                        if let mPath = headGeo.markPaths[idx],
+                           let mColor = headGeo.markColors[idx] {
                             ctx.saveGState()
                             ctx.translateBy(x: headCenter.x, y: headCenter.y)
                             let skipJawClip = shouldSkipJawHeadClip(mark)
@@ -3688,6 +3635,8 @@ enum CatRenderer {
                             }
                             ctx.restoreGState()
                         }
+                    default:
+                        break
                     }
                 }
 
