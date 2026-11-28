@@ -15,6 +15,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <initializer_list>
 #include <algorithm>
 #include <unistd.h>
 #include "KeyMap.hpp"
@@ -35,7 +36,7 @@
 #include <fcntl.h>
 #include <glib-unix.h>
 
-#define KUROCAT_VERSION_STR "1.5.4"
+#define KUROCAT_VERSION_STR "1.6.0"
 static constexpr const char* APP_VERSION = KUROCAT_VERSION_STR;
 // Other KuroCat builds scan installed binaries for this marker (see readBinaryVersion) to find the
 // newest copy WITHOUT executing it. Always derived from KUROCAT_VERSION_STR.
@@ -118,7 +119,6 @@ struct LinuxApp {
     double lastDragRootX = 0.0;
     double lastDragRootY = 0.0;
     int dragStartWinX = 0, dragStartWinY = 0;
-    double dragScruffDeltaX = 0.0, dragScruffDeltaY = 0.0;
     bool hasSavedObsPos = false;
     int savedObsPosX = 0, savedObsPosY = 0;
 
@@ -540,19 +540,167 @@ struct LinuxUpdateResult {
     bool hasUpdate = false;
     std::string latestTag;
     std::string releaseUrl;
+    std::string notesZh;
+    std::string notesEn;
+    std::string notes;
 };
+
+static void appendUtf8CodePoint(std::string& out, unsigned int cp) {
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0x10FFFFu) {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+}
+
+static bool parseHex4(const std::string& s, size_t pos, unsigned int& val) {
+    if (pos + 4 > s.size()) return false;
+    unsigned int acc = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        char c = s[pos + i];
+        acc <<= 4;
+        if (c >= '0' && c <= '9') acc |= static_cast<unsigned int>(c - '0');
+        else if (c >= 'a' && c <= 'f') acc |= static_cast<unsigned int>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') acc |= static_cast<unsigned int>(c - 'A' + 10);
+        else return false;
+    }
+    val = acc;
+    return true;
+}
 
 static std::string extractJsonField(const std::string& json, const char* fieldName) {
     std::string key = std::string("\"") + fieldName + "\"";
-    size_t pos = json.find(key);
-    if (pos == std::string::npos) return "";
-    pos = json.find(':', pos + key.size());
-    if (pos == std::string::npos) return "";
-    pos = json.find('"', pos + 1);
-    if (pos == std::string::npos) return "";
-    size_t end = json.find('"', pos + 1);
-    if (end == std::string::npos) return "";
-    return json.substr(pos + 1, end - pos - 1);
+    auto isWs = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+    size_t searchPos = 0;
+    while (true) {
+        size_t pos = json.find(key, searchPos);
+        if (pos == std::string::npos) return "";
+        searchPos = pos + key.size();
+        size_t i = searchPos;
+        while (i < json.size() && isWs(json[i])) ++i;
+        if (i >= json.size() || json[i] != ':') continue;
+        ++i;
+        while (i < json.size() && isWs(json[i])) ++i;
+        if (i >= json.size() || json[i] != '"') return "";
+        ++i;
+
+        std::string out;
+        while (i < json.size()) {
+            char c = json[i++];
+            if (c == '"') return out;
+            if (c == '\\') {
+                if (i >= json.size()) break;
+                char esc = json[i++];
+                switch (esc) {
+                    case '"': out.push_back('"'); break;
+                    case '\\': out.push_back('\\'); break;
+                    case '/': out.push_back('/'); break;
+                    case 'b': out.push_back('\b'); break;
+                    case 'f': out.push_back('\f'); break;
+                    case 'n': out.push_back('\n'); break;
+                    case 'r': out.push_back('\r'); break;
+                    case 't': out.push_back('\t'); break;
+                    case 'u': {
+                        unsigned int u1 = 0;
+                        if (parseHex4(json, i, u1)) {
+                            i += 4;
+                            if (u1 >= 0xD800u && u1 <= 0xDBFFu &&
+                                i + 6 <= json.size() && json[i] == '\\' && json[i + 1] == 'u') {
+                                unsigned int u2 = 0;
+                                if (parseHex4(json, i + 2, u2) && u2 >= 0xDC00u && u2 <= 0xDFFFu) {
+                                    i += 6;
+                                    unsigned int cp = 0x10000u + (((u1 - 0xD800u) << 10) | (u2 - 0xDC00u));
+                                    appendUtf8CodePoint(out, cp);
+                                    break;
+                                }
+                            }
+                            appendUtf8CodePoint(out, u1);
+                        }
+                        break;
+                    }
+                    default:
+                        out.push_back(esc);
+                        break;
+                }
+            } else {
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
+}
+
+static std::string extractFirstJsonField(const std::string& json, std::initializer_list<const char*> keys) {
+    for (const char* k : keys) {
+        std::string v = extractJsonField(json, k);
+        if (!v.empty()) return v;
+    }
+    return "";
+}
+
+static std::string formatReleaseNotes(const std::string& raw) {
+    if (raw.empty()) return "";
+    std::string norm;
+    norm.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+        char c = raw[i];
+        if (c == '\r') {
+            norm.push_back('\n');
+            if (i + 1 < raw.size() && raw[i + 1] == '\n') ++i;
+        } else {
+            norm.push_back(c);
+        }
+    }
+    auto isSpace = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+    size_t start = 0;
+    while (start < norm.size() && isSpace(norm[start])) ++start;
+    size_t end = norm.size();
+    while (end > start && isSpace(norm[end - 1])) --end;
+    if (start >= end) return "";
+    norm = norm.substr(start, end - start);
+
+    const int maxLines = 16;
+    const size_t maxBytes = 1200;
+    int lineCount = 1;
+    bool truncated = false;
+    size_t cutPos = norm.size();
+    for (size_t i = 0; i < norm.size(); ++i) {
+        if (i >= maxBytes) {
+            cutPos = i;
+            // Back up to avoid splitting a multi-byte UTF-8 sequence.
+            while (cutPos > 0 && (static_cast<unsigned char>(norm[cutPos]) & 0xC0u) == 0x80u) {
+                --cutPos;
+            }
+            truncated = true;
+            break;
+        }
+        if (norm[i] == '\n') {
+            if (lineCount >= maxLines) {
+                cutPos = i;
+                truncated = true;
+                break;
+            }
+            ++lineCount;
+        }
+    }
+    std::string clamped = norm.substr(0, cutPos);
+    while (!clamped.empty() && isSpace(clamped.back())) clamped.pop_back();
+    if (truncated) clamped += "…";
+    return clamped;
 }
 
 static bool isSemVerNewer(const std::string& lhs, const std::string& rhs) {
@@ -644,16 +792,25 @@ static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
         std::string body = fetchUrlBody("https://kurocat-download.app.workbuddy.host/version.json?sharecode=JVAABIVZ7L");
         std::string tag = extractJsonField(body, "tag_name");
         std::string url = extractJsonField(body, "html_url");
+        std::string notesZh = extractFirstJsonField(body, { "changelog_zh", "notes_zh" });
+        std::string notesEn = extractFirstJsonField(body, { "changelog_en", "notes_en" });
+        std::string notes = extractFirstJsonField(body, { "changelog", "notes", "release_notes", "body" });
 
         if (tag.empty()) {
             std::string html = fetchUrlBody(UPDATE_PAGE_URL);
             tag = extractVersionFromHtml(html);
+            notesZh.clear();
+            notesEn.clear();
+            notes.clear();
         }
 
         if (!tag.empty()) {
             res->ok = true;
             res->latestTag = tag;
             res->releaseUrl = url.empty() ? UPDATE_PAGE_URL : url;
+            res->notesZh = notesZh;
+            res->notesEn = notesEn;
+            res->notes = notes;
             res->hasUpdate = isSemVerNewer(tag, APP_VERSION);
         }
 
@@ -665,6 +822,7 @@ static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
                 g_app->isCheckingUpdates = false;
                 g_app->pendingManualUpdateCheck = false;
             }
+            bool en = g_app && g_app->settings.isEnglish;
             if (g_app && r->ok && r->hasUpdate) {
                 g_app->availableUpdateVersion = r->latestTag;
                 g_app->availableUpdateUrl = r->releaseUrl;
@@ -672,15 +830,25 @@ static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
                     delete r;
                     return G_SOURCE_REMOVE;
                 }
+                const std::string& rawNotes = en
+                    ? (!r->notesEn.empty() ? r->notesEn : (!r->notes.empty() ? r->notes : r->notesZh))
+                    : (!r->notesZh.empty() ? r->notesZh : (!r->notes.empty() ? r->notes : r->notesEn));
+                std::string releaseNotes = formatReleaseNotes(rawNotes);
+                std::string notesBlock = releaseNotes.empty()
+                    ? std::string("")
+                    : ((en ? "\n\nWhat's New:\n" : "\n\n更新内容：\n") + releaseNotes);
+                std::string secondary = en
+                    ? (std::string("Current version: v") + APP_VERSION + "\nLatest version: " + r->latestTag + notesBlock
+                        + "\n\nClick \"Update Now\" to download and restart automatically.\nClick \"Later\" to stop automatic prompts (you can still check manually from the menu).")
+                    : (std::string("当前版本：v") + APP_VERSION + "\n最新版本：" + r->latestTag + notesBlock
+                        + "\n\n点击「立即更新」将在后台自动下载并重启。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在右键菜单点击「检查更新」）。");
                 GtkWidget* dlg = gtk_message_dialog_new(
                     nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_NONE,
-                    "发现 KuroCat 新版本 %s", r->latestTag.c_str());
+                    en ? "New KuroCat %s Available" : "发现 KuroCat 新版本 %s", r->latestTag.c_str());
                 gtk_message_dialog_format_secondary_text(
-                    GTK_MESSAGE_DIALOG(dlg),
-                    "当前版本：v%s\n最新版本：%s\n\n点击「立即更新」将在后台自动下载并重启。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在右键菜单点击「检查更新」）。",
-                    APP_VERSION, r->latestTag.c_str());
-                gtk_dialog_add_button(GTK_DIALOG(dlg), "立即更新", GTK_RESPONSE_YES);
-                gtk_dialog_add_button(GTK_DIALOG(dlg), "暂不更新", GTK_RESPONSE_NO);
+                    GTK_MESSAGE_DIALOG(dlg), "%s", secondary.c_str());
+                gtk_dialog_add_button(GTK_DIALOG(dlg), en ? "Update Now" : "立即更新", GTK_RESPONSE_YES);
+                gtk_dialog_add_button(GTK_DIALOG(dlg), en ? "Later" : "暂不更新", GTK_RESPONSE_NO);
                 int resp = gtk_dialog_run(GTK_DIALOG(dlg));
                 gtk_widget_destroy(dlg);
                 if (resp == GTK_RESPONSE_YES) {
@@ -695,10 +863,16 @@ static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
                 GtkWidget* dlg = gtk_message_dialog_new(
                     nullptr, GTK_DIALOG_MODAL,
                     r->ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
-                    "%s", r->ok ? "已是最新版本" : "检查更新失败");
+                    "%s",
+                    r->ok
+                        ? (en ? "You Are Up to Date" : "已是最新版本")
+                        : (en ? "Unable to Check for Updates" : "检查更新失败"));
                 gtk_message_dialog_format_secondary_text(
                     GTK_MESSAGE_DIALOG(dlg),
-                    "%s", r->ok ? "当前版本已是最新版本。" : "无法连接到更新服务器，请稍后重试或检查网络连接。");
+                    "%s",
+                    r->ok
+                        ? (en ? "Current version is already the latest version." : "当前版本已是最新版本。")
+                        : (en ? "Could not reach the update server. Please check your network connection and try again later." : "无法连接到更新服务器，请稍后重试或检查网络连接。"));
                 gtk_dialog_run(GTK_DIALOG(dlg));
                 gtk_widget_destroy(dlg);
             }
@@ -2167,6 +2341,38 @@ static void showSettingsWindow() {
     gtk_window_present(GTK_WINDOW(win));
 }
 
+static void showChangelogDialog() {
+    if (!g_app) return;
+    g_app->settings.lastSeenChangelogVersion = APP_VERSION;
+    g_app->settings.save();
+    bool en = g_app->settings.isEnglish;
+    auto tr = [&](const char* zh, const char* eng) -> const char* { return en ? eng : zh; };
+    std::string heading = std::string(tr("✨ KuroCat v", "✨ What's New in KuroCat v")) + APP_VERSION + (en ? "" : " 更新日志");
+    std::string body = tr(
+        "欢迎使用 KuroCat v1.6.0！本次核心升级：\n\n"
+        "• 12 部位「一叠透明纸」像素图层引擎：支持工坊全可见区直绘、裁剪蒙版、透明锁、混合模式与选区变换。\n"
+        "• 真 3D 球面头部 + 四肢/尾巴弯曲贴图：带缓存，转头、呼吸与趴睡自然跟动；支持独立眼球贴图与鼻/嘴直绘。\n"
+        "• 爪尖与坐姿后爪直绘：自定义皮肤不再被默认色块覆盖，工坊、官网与三端桌宠效果完全同步。\n"
+        "• 皮肤工坊大画板 + 悬浮透明预览：全屏绘画空间、自由拖动/缩放小猫预览与 .kurocat v2 导入导出。",
+        "Welcome to KuroCat v1.6.0! What's new:\n\n"
+        "• 12-Part Transparent Pixel Layer Engine: full-area painting, clipping masks, alpha lock, blend modes & selections in Skin Workshop.\n"
+        "• True 3D Spherical Head + Curved Limb/Tail Warps: cached 3D head turns and Bezier strips, plus direct custom irises, nose & mouth.\n"
+        "• Unoccluded Paws: hand-painted paw tips & sitting hind paws render directly without default color cuffs/pads covering them.\n"
+        "• Full-Bleed Workshop & Floating Pet: enlarged painting studio, draggable/resizable preview & .kurocat v2 support."
+    );
+    GtkWidget* dlg = gtk_message_dialog_new(
+        nullptr, GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_NONE,
+        "%s", heading.c_str());
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dlg), "%s", body.c_str());
+    gtk_dialog_add_button(GTK_DIALOG(dlg), tr("打开皮肤工坊", "Open Skin Workshop"), GTK_RESPONSE_ACCEPT);
+    gtk_dialog_add_button(GTK_DIALOG(dlg), tr("知道了", "Got It"), GTK_RESPONSE_CLOSE);
+    g_signal_connect(dlg, "response", G_CALLBACK(+[](GtkDialog* d, gint resp, gpointer) {
+        if (resp == GTK_RESPONSE_ACCEPT) openUrlInBrowser("https://chanke17.github.io/KuroCat-Workshop/");
+        gtk_widget_destroy(GTK_WIDGET(d));
+    }), nullptr);
+    gtk_widget_show_all(dlg);
+}
+
 static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
     GtkWidget* menu = gtk_menu_new();
 
@@ -2299,6 +2505,12 @@ static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
     }));
 
     addSep();
+    {
+        std::string clLbl = std::string(tr("✨ 更新日志 (v", "✨ What's New (v")) + APP_VERSION + ")";
+        addAction(clLbl.c_str(), G_CALLBACK(+[](GtkMenuItem*, gpointer) {
+            showChangelogDialog();
+        }));
+    }
     if (!app.availableUpdateVersion.empty()) {
         std::string lbl = app.isUpdating
             ? (std::string(tr("⏳ 正在下载更新 ", "⏳ Downloading update ")) + app.availableUpdateVersion + "...")
@@ -2426,17 +2638,6 @@ static gboolean onButtonPress(GtkWidget*, GdkEventButton* evt, gpointer) {
         g_app->lastDragRootX = evt->x_root;
         g_app->lastDragRootY = evt->y_root;
         gtk_window_get_position(GTK_WINDOW(g_app->window), &g_app->dragStartWinX, &g_app->dragStartWinY);
-        if (g_app->settings.enableDragAnimation) {
-            int ww = 0, wh = 0;
-            gtk_window_get_size(GTK_WINDOW(g_app->window), &ww, &wh);
-            Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*g_app), g_app->settings.flipHorizontal, g_app->settings.rotationDeg);
-            double sc = (double)std::max(1, ww) / (double)CatPhysics::CanvasWidth;
-            g_app->dragScruffDeltaX = evt->x_root - (double)pinch.x * sc - (double)g_app->dragStartWinX;
-            g_app->dragScruffDeltaY = evt->y_root - (double)pinch.y * sc - (double)g_app->dragStartWinY;
-        } else {
-            g_app->dragScruffDeltaX = 0.0;
-            g_app->dragScruffDeltaY = 0.0;
-        }
         g_app->physics.setDragging(g_app->settings.enableDragAnimation, 0.0f, 0.0f);
         return TRUE;
     }
@@ -2484,10 +2685,8 @@ static gboolean onMotionNotify(GtkWidget*, GdkEventMotion* evt, gpointer) {
         return TRUE;
     }
     if (g_app->isDragging) {
-        double t = std::clamp((double)g_app->physics.scruffDrag.value, 0.0, 1.0);
-        double ease = t * t * (3.0 - 2.0 * t);
-        int nx = g_app->dragStartWinX + (int)std::round((evt->x_root - g_app->dragStartRootX) + g_app->dragScruffDeltaX * ease);
-        int ny = g_app->dragStartWinY + (int)std::round((evt->y_root - g_app->dragStartRootY) + g_app->dragScruffDeltaY * ease);
+        int nx = g_app->dragStartWinX + (int)std::round(evt->x_root - g_app->dragStartRootX);
+        int ny = g_app->dragStartWinY + (int)std::round(evt->y_root - g_app->dragStartRootY);
         float dx = (float)(evt->x_root - g_app->lastDragRootX);
         float dy = (float)(evt->y_root - g_app->lastDragRootY);
         g_app->lastDragRootX = evt->x_root;
@@ -2911,15 +3110,6 @@ static gboolean onFrameTick(gpointer) {
         g_app->physics.step(dt / (float)substeps, (float)winX, (float)winY, (float)winW,
                             g_app->input, g_app->settings, curSkin.typingStyle, curSkin.renderStyle, isClassicBuiltIn);
     }
-    if (g_app->isDragging && (std::fabs(g_app->dragScruffDeltaX) > 0.5 || std::fabs(g_app->dragScruffDeltaY) > 0.5)) {
-        double t = std::clamp((double)g_app->physics.scruffDrag.value, 0.0, 1.0);
-        double ease = t * t * (3.0 - 2.0 * t);
-        int nx = g_app->dragStartWinX + (int)std::round((g_app->lastDragRootX - g_app->dragStartRootX) + g_app->dragScruffDeltaX * ease);
-        int ny = g_app->dragStartWinY + (int)std::round((g_app->lastDragRootY - g_app->dragStartRootY) + g_app->dragScruffDeltaY * ease);
-        if (nx != winX || ny != winY) {
-            gtk_window_move(GTK_WINDOW(g_app->window), nx, ny);
-        }
-    }
 
     // Idle dirty-check: skip gtk_widget_queue_draw when completely static to achieve 0fps idle redraw.
     struct RenderedPoseSnapshot {
@@ -3182,6 +3372,12 @@ int main(int argc, char** argv) {
     app.lastTickTime = nowSeconds();
     startMusicPoller();
     scheduleFrames(desiredFrameIntervalMs(app));
+    if (app.settings.lastSeenChangelogVersion != APP_VERSION) {
+        g_timeout_add(1200, +[](gpointer) -> gboolean {
+            if (g_app) showChangelogDialog();
+            return G_SOURCE_REMOVE;
+        }, nullptr);
+    }
     startAsyncUpdateCheck(false, 2500);
 
     gtk_main();

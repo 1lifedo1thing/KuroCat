@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var availableUpdateVersion: String?
     private var availableUpdateURL: URL?
     private var availableAssetURL: URL?
+    private var availableUpdateNotes: String?
     private var isUpdating = false
     private var isCheckingUpdates = false
     private var pendingManualUpdateCheck = false
@@ -65,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastAnnouncedHour: Int = -1
 
     private var currentAppVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.7"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.6.0"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -120,6 +121,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startRenderLoop()
         startWindowWatchdog()
         startHourlyAnnouncement()
+
+        // Show one-time What's New changelog after an update to a new version
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, !self.isHandingOverToNewerCopy else { return }
+            if CatSettings.shared.lastSeenChangelogVersion != self.currentAppVersion {
+                self.showChangelog()
+            }
+        }
 
         // Auto-check GitHub Releases for updates shortly after launch
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -670,6 +679,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(settingsItem)
 
         menu.addItem(.separator())
+
+        let changelogItem = NSMenuItem(
+            title: tr("✨ 更新日志 (v\(currentAppVersion))", "✨ What's New (v\(currentAppVersion))"),
+            action: #selector(openChangelog),
+            keyEquivalent: ""
+        )
+        changelogItem.target = self
+        menu.addItem(changelogItem)
 
         if let ver = availableUpdateVersion {
             let title = isUpdating
@@ -1487,17 +1504,123 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         checkForUpdates(manual: true)
     }
 
+    @objc private func openChangelog() {
+        showChangelog()
+    }
+
+    private func showChangelog() {
+        CatSettings.shared.lastSeenChangelogVersion = currentAppVersion
+        func tr(_ zh: String, _ en: String) -> String { CatSettings.shared.isEnglish ? en : zh }
+        let title = tr("✨ KuroCat v\(currentAppVersion) 更新日志", "✨ What's New in KuroCat v\(currentAppVersion)")
+        let message = tr(
+            "欢迎使用 KuroCat v\(currentAppVersion)！本次核心升级：\n\n• 12 部位「一叠透明纸」像素图层引擎：支持工坊全可见区直绘、裁剪蒙版、透明锁、混合模式与选区变换。\n• 真 3D 球面头部 + 四肢/尾巴弯曲贴图：带缓存，转头、呼吸与趴睡自然跟动；支持独立眼球贴图与鼻/嘴直绘。\n• 爪尖与坐姿后爪直绘：自定义皮肤不再被默认色块覆盖，工坊、官网与三端桌宠效果完全同步。\n• 皮肤工坊大画板 + 悬浮透明预览：全屏绘画空间、自由拖动/缩放小猫预览与 .kurocat v2 导入导出。",
+            "Welcome to KuroCat v\(currentAppVersion)! What's new:\n\n• 12-Part Transparent Pixel Layer Engine: full-area painting, clipping masks, alpha lock, blend modes & selections in Skin Workshop.\n• True 3D Spherical Head + Curved Limb/Tail Warps: cached 3D head turns and Bezier strips, plus direct custom irises, nose & mouth.\n• Unoccluded Paws: hand-painted paw tips & sitting hind paws render directly without default color cuffs/pads covering them.\n• Full-Bleed Workshop & Floating Pet: enlarged painting studio, draggable/resizable transparent preview & .kurocat v2 support."
+        )
+        presentNonModalUpdatePrompt(
+            title: title,
+            message: message,
+            primaryTitle: tr("打开皮肤工坊", "Open Skin Workshop"),
+            cancelTitle: tr("知道了", "Got It"),
+            onPrimary: { [weak self] in
+                CatSettings.shared.lastSeenChangelogVersion = self?.currentAppVersion ?? "1.6.0"
+                self?.openSkinWorkshop()
+            },
+            onCancel: { [weak self] in
+                CatSettings.shared.lastSeenChangelogVersion = self?.currentAppVersion ?? "1.6.0"
+            }
+        )
+    }
+
     @objc private func openUpdateDownload() {
         performInAppUpdate()
     }
 
-    private func parseUpdateInfo(from data: Data) -> (tag: String, pageURL: URL?, assetURL: URL?)? {
+    private struct UpdateInfo {
+        let tag: String
+        let pageURL: URL?
+        let assetURL: URL?
+        let notesZh: String?
+        let notesEn: String?
+        let notes: String?
+    }
+
+    private func extractNotes(from json: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            guard let rawVal = json[key] else { continue }
+            var text = ""
+            if let s = rawVal as? String {
+                text = s
+            } else if let arr = rawVal as? [Any] {
+                let items = arr.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                if !items.isEmpty {
+                    text = items.map { item in
+                        if item.hasPrefix("•") || item.hasPrefix("-") || item.hasPrefix("*") {
+                            return item
+                        }
+                        return "• " + item
+                    }.joined(separator: "\n")
+                }
+            }
+            let normalized = text
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+        return nil
+    }
+
+    private func clampReleaseNotes(_ raw: String) -> String? {
+        let normalized = raw
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+
+        let maxLines = 16
+        let maxChars = 1200
+        var lines = normalized.components(separatedBy: "\n")
+        var truncated = false
+        if lines.count > maxLines {
+            lines = Array(lines.prefix(maxLines))
+            truncated = true
+        }
+        var joined = lines.joined(separator: "\n")
+        if joined.count > maxChars {
+            joined = String(joined.prefix(maxChars)).trimmingCharacters(in: .whitespacesAndNewlines)
+            truncated = true
+        }
+        return truncated ? (joined + "…") : joined
+    }
+
+    private func resolvedReleaseNotes(from info: UpdateInfo) -> String? {
+        let picked = CatSettings.shared.isEnglish
+            ? (info.notesEn ?? info.notes ?? info.notesZh)
+            : (info.notesZh ?? info.notes ?? info.notesEn)
+        guard let picked else { return nil }
+        return clampReleaseNotes(picked)
+    }
+
+    private func parseUpdateInfo(from data: Data) -> UpdateInfo? {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let tagName = json["tag_name"] as? String, !tagName.isEmpty {
             let pageStr = (json["html_url"] as? String) ?? Self.updatePageURLString
             let assets = json["assets"] as? [String: Any]
             let macStr = (assets?["macos"] as? String) ?? Self.defaultMacAssetURLString
-            return (tagName, URL(string: pageStr), URL(string: macStr))
+            let notesZh = extractNotes(from: json, keys: ["changelog_zh", "notes_zh"])
+            let notesEn = extractNotes(from: json, keys: ["changelog_en", "notes_en"])
+            let notes = extractNotes(from: json, keys: ["changelog", "notes", "release_notes", "body"])
+            return UpdateInfo(
+                tag: tagName,
+                pageURL: URL(string: pageStr),
+                assetURL: URL(string: macStr),
+                notesZh: notesZh,
+                notesEn: notesEn,
+                notes: notes
+            )
         }
         if let html = String(data: data, encoding: .utf8) {
             let patterns = [
@@ -1508,14 +1631,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let regex = try? NSRegularExpression(pattern: pattern),
                    let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
                    let r = Range(match.range(at: 1), in: html) {
-                    return ("v" + String(html[r]), URL(string: Self.updatePageURLString), URL(string: Self.defaultMacAssetURLString))
+                    return UpdateInfo(
+                        tag: "v" + String(html[r]),
+                        pageURL: URL(string: Self.updatePageURLString),
+                        assetURL: URL(string: Self.defaultMacAssetURLString),
+                        notesZh: nil,
+                        notesEn: nil,
+                        notes: nil
+                    )
                 }
             }
         }
         return nil
     }
 
-    private func fetchUpdateEndpoint(_ urlString: String, completion: @escaping ((tag: String, pageURL: URL?, assetURL: URL?)?) -> Void) {
+    private func fetchUpdateEndpoint(_ urlString: String, completion: @escaping (UpdateInfo?) -> Void) {
         guard let url = URL(string: urlString) else {
             completion(nil)
             return
@@ -1541,7 +1671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isCheckingUpdates = true
         pendingManualUpdateCheck = manual
 
-        func finish(_ info: (tag: String, pageURL: URL?, assetURL: URL?)?) {
+        func finish(_ info: UpdateInfo?) {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let effectiveManual = manual || self.pendingManualUpdateCheck
@@ -1600,19 +1730,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ctrl.present()
     }
 
-    private func handleUpdateResult(_ info: (tag: String, pageURL: URL?, assetURL: URL?), manual: Bool) {
+    private func handleUpdateResult(_ info: UpdateInfo, manual: Bool) {
+        let notes = resolvedReleaseNotes(from: info)
+        let en = CatSettings.shared.isEnglish
         if isVersion(info.tag, newerThan: currentAppVersion),
            let local = newestDownloadedCopy(), !isVersion(info.tag, newerThan: local.version) {
             availableUpdateVersion = info.tag
             availableUpdateURL = info.pageURL
             availableAssetURL = info.assetURL
+            availableUpdateNotes = notes
             if !manual && CatSettings.shared.suppressAutoUpdatePrompt { return }
+            let notesBlock = notes.map { en ? "\n\nWhat's New:\n\($0)" : "\n\n更新内容：\n\($0)" } ?? ""
             // Present non-modally above the overlay window so right-click menus and quitting remain responsive.
             presentNonModalUpdatePrompt(
-                title: "你已经下载了新版本 v\(local.version)",
-                message: "但现在运行的还是旧版 v\(currentAppVersion)：\n\(Bundle.main.bundlePath)\n\n新版本位置：\n\(local.url.path)\n\n点击「切换到新版本」会关闭旧版并打开新版。点击「暂不更新」后续将不再自动弹窗提醒。",
-                primaryTitle: "切换到新版本",
-                cancelTitle: "暂不更新",
+                title: en ? "New version v\(local.version) is already downloaded" : "你已经下载了新版本 v\(local.version)",
+                message: en
+                    ? "You are still running v\(currentAppVersion):\n\(Bundle.main.bundlePath)\n\nNew version location:\n\(local.url.path)\(notesBlock)\n\nClick \"Switch to New Version\" to close this copy and open the new one. Click \"Later\" to stop automatic prompts."
+                    : "但现在运行的还是旧版 v\(currentAppVersion)：\n\(Bundle.main.bundlePath)\n\n新版本位置：\n\(local.url.path)\(notesBlock)\n\n点击「切换到新版本」会关闭旧版并打开新版。点击「暂不更新」后续将不再自动弹窗提醒。",
+                primaryTitle: en ? "Switch to New Version" : "切换到新版本",
+                cancelTitle: en ? "Later" : "暂不更新",
                 onPrimary: { [weak self] in
                     CatSettings.shared.suppressAutoUpdatePrompt = false
                     self?.switchToDownloadedCopy(local.url)
@@ -1627,10 +1763,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             availableUpdateVersion = info.tag
             availableUpdateURL = info.pageURL
             availableAssetURL = info.assetURL
+            availableUpdateNotes = notes
             if !manual && CatSettings.shared.suppressAutoUpdatePrompt { return }
-            promptUpdateAvailable(latestTag: info.tag)
+            promptUpdateAvailable(latestTag: info.tag, releaseNotes: notes)
         } else if manual {
-            showInfoAlert(title: "已是最新版本", message: "当前版本 v\(currentAppVersion) 已是最新版本。")
+            showInfoAlert(
+                title: en ? "You Are Up to Date" : "已是最新版本",
+                message: en ? "Current version v\(currentAppVersion) is already the latest version." : "当前版本 v\(currentAppVersion) 已是最新版本。"
+            )
         }
     }
 
@@ -1650,13 +1790,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
-    private func promptUpdateAvailable(latestTag: String) {
+    private func promptUpdateAvailable(latestTag: String, releaseNotes: String?) {
+        let en = CatSettings.shared.isEnglish
+        let notesBlock = releaseNotes.flatMap { n -> String? in
+            let trimmed = n.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return en ? "\n\nWhat's New:\n\(trimmed)" : "\n\n更新内容：\n\(trimmed)"
+        } ?? ""
         presentNonModalUpdatePrompt(
-            title: "发现 KuroCat 新版本 \(latestTag)",
-            message: "当前版本：v\(currentAppVersion)\n最新版本：\(latestTag)\n当前运行位置：\(Bundle.main.bundlePath)\n\n点击「立即更新」将在后台自动下载安装包并重启应用。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在菜单栏点击「检查更新」）。",
-            primaryTitle: "立即更新",
-            secondaryTitle: "打开下载页",
-            cancelTitle: "暂不更新",
+            title: en ? "New KuroCat \(latestTag) Available" : "发现 KuroCat 新版本 \(latestTag)",
+            message: en
+                ? "Current version: v\(currentAppVersion)\nLatest version: \(latestTag)\nLocation: \(Bundle.main.bundlePath)\(notesBlock)\n\nClick \"Update Now\" to download and restart automatically.\nClick \"Later\" to stop automatic prompts (you can still check manually from the menu)."
+                : "当前版本：v\(currentAppVersion)\n最新版本：\(latestTag)\n当前运行位置：\(Bundle.main.bundlePath)\(notesBlock)\n\n点击「立即更新」将在后台自动下载安装包并重启应用。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在菜单栏点击「检查更新」）。",
+            primaryTitle: en ? "Update Now" : "立即更新",
+            secondaryTitle: en ? "Download Page" : "打开下载页",
+            cancelTitle: en ? "Later" : "暂不更新",
             onPrimary: { [weak self] in
                 CatSettings.shared.suppressAutoUpdatePrompt = false
                 self?.performInAppUpdate()
@@ -1950,7 +2098,7 @@ private final class UpdatePromptWindowController: NSWindowController, NSWindowDe
         cancelAction = onCancel
 
         guard let window else { return }
-        let width: CGFloat = 440
+        let width: CGFloat = 480
         let textX: CGFloat = 86
         let textW: CGFloat = width - textX - 22
 
@@ -1972,11 +2120,41 @@ private final class UpdatePromptWindowController: NSWindowController, NSWindowDe
         msgField.font = .systemFont(ofSize: 12.5)
         msgField.textColor = .labelColor
         msgField.isSelectable = true
-        let msgH = ceil(msgField.sizeThatFits(NSSize(width: textW, height: 600)).height)
-        msgField.frame = NSRect(x: textX, y: 20 + titleH + 8, width: textW, height: msgH)
-        content.addSubview(msgField)
+        let scrollMaxH: CGFloat = 340
+        let rawMsgH = ceil(msgField.sizeThatFits(NSSize(width: textW, height: 2400)).height)
+        let msgH = min(rawMsgH, scrollMaxH)
+        let msgY = 20 + titleH + 8
+        if rawMsgH > scrollMaxH {
+            let scrollView = NSScrollView(frame: NSRect(x: textX, y: msgY, width: textW, height: msgH))
+            scrollView.hasVerticalScroller = true
+            scrollView.hasHorizontalScroller = false
+            scrollView.borderType = .noBorder
+            scrollView.drawsBackground = false
+            scrollView.autohidesScrollers = true
 
-        let btnY = max(88, 20 + titleH + 8 + msgH + 18)
+            let tvWidth = max(120, textW - 14)
+            let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: tvWidth, height: rawMsgH))
+            tv.isEditable = false
+            tv.isSelectable = true
+            tv.drawsBackground = false
+            tv.font = .systemFont(ofSize: 12.5)
+            tv.textColor = .labelColor
+            tv.textContainerInset = .zero
+            tv.textContainer?.lineFragmentPadding = 0
+            tv.textContainer?.widthTracksTextView = true
+            tv.isVerticallyResizable = true
+            tv.isHorizontallyResizable = false
+            tv.autoresizingMask = [.width]
+            tv.string = message
+            tv.sizeToFit()
+            scrollView.documentView = tv
+            content.addSubview(scrollView)
+        } else {
+            msgField.frame = NSRect(x: textX, y: msgY, width: textW, height: msgH)
+            content.addSubview(msgField)
+        }
+
+        let btnY = max(88, msgY + msgH + 18)
         var rightEdge = width - 20
 
         func addButton(title: String, keyEquivalent: String, action: Selector) {

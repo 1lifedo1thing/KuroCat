@@ -81,6 +81,20 @@ struct SkinDecoration {
     mutable std::shared_ptr<void> nativeImage; // decoded platform image cache (cairo surface / GDI+ bitmap)
 };
 
+struct SkinPartTexture {
+    std::vector<uint8_t> png;
+    int pixelWidth = 0, pixelHeight = 0;
+    mutable std::shared_ptr<void> nativeImage;   // decoded platform bitmap / surface
+    mutable std::vector<uint8_t> premulRGBA;     // premultiplied RGBA8888 (pixelWidth * pixelHeight * 4)
+    mutable uint64_t cacheTag = 0;
+};
+
+struct SkinPartTextureOptions {
+    bool hideDefaultPupil = false;
+    bool hideDefaultNose = false;
+    bool hideDefaultMouth = false;
+};
+
 struct SkinPalette {
     SkinColor body, headBody, bodyShade, belly, legs, paws, hindLeg, hindPaw, pawPads, earOuter, earInner, nose, mouth,
               iris, irisLeft, irisRight, pupil, pupilLeft, pupilRight,
@@ -103,10 +117,34 @@ struct SkinSpec {
     // shoulder; "chest" leaves them chest-coloured (only paws + creases), as the built-in coats are drawn.
     bool idleLegsTinted = true;
     std::vector<SkinDecoration> decorations;
+    std::map<std::string, SkinPartTexture> partTextures;
+    SkinPartTextureOptions partTextureOptions;
     std::vector<uint8_t> preview;
 
     bool colorpoint() const { return palette.points.set; }
+    bool hasPartTexture(const char* key) const {
+        return key && partTextures.find(key) != partTextures.end();
+    }
+    const SkinPartTexture* partTexture(const char* key) const {
+        if (!key) return nullptr;
+        auto it = partTextures.find(key);
+        return it == partTextures.end() ? nullptr : &it->second;
+    }
+    static inline const char* partSpaceTextureKey(SkinSpace s) {
+        switch (s) {
+            case SkinSpace::Head:     return "head";
+            case SkinSpace::Body:     return "body";
+            case SkinSpace::Tail:     return "tail";
+            case SkinSpace::LeftEar:  return "leftEar";
+            case SkinSpace::RightEar: return "rightEar";
+            case SkinSpace::LeftArm:  return "leftArm";
+            case SkinSpace::RightArm: return "rightArm";
+            case SkinSpace::HindLeg:  return "hindLeg";
+            default: return nullptr;
+        }
+    }
     bool hasPartArt(SkinSpace s) const {
+        if (const char* tk = partSpaceTextureKey(s); tk && hasPartTexture(tk)) return true;
         for (const auto& r : regions) if (r.space == s) return true;
         for (const auto& m : marks) if (m.space == s) return true;
         return false;
@@ -700,6 +738,50 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
             if (!number(c, d.get("offsetX"), f + ".offsetX", -120, 120, deco.offsetX) || !number(c, d.get("offsetY"), f + ".offsetY", -120, 120, deco.offsetY) ||
                 !number(c, d.get("scale"), f + ".scale", 0.05, 4, deco.scale) || !number(c, d.get("rotation"), f + ".rotation", -180, 180, deco.rotation)) { error = c.error; return false; }
             s.decorations.push_back(std::move(deco));
+        }
+    }
+
+    // Per-part transparent pixel textures (1.6.0+)
+    if (const Value* pts = root.get("partTextures"); pts && pts->type != Value::JNull) {
+        if (pts->type != Value::JObject) { error = "partTextures 必须是对象"; return false; }
+        static const char* ptKeys[] = {
+            "head", "body", "leftEar", "rightEar", "leftArm", "rightArm", "hindLeg", "tail",
+            "leftIris", "rightIris", "leftHindPaw", "rightHindPaw"
+        };
+        for (const char* k : ptKeys) {
+            const Value* pv = pts->get(k);
+            if (!pv || pv->type == Value::JNull) continue;
+            std::string f = std::string("partTextures.") + k;
+            if (pv->type != Value::JString) { error = f + " 必须是 base64 编码的 PNG"; return false; }
+            if (pv->s.empty()) continue;
+            SkinPartTexture tex;
+            if (!skinjson::base64Decode(pv->s, tex.png)) { error = f + " 必须是 base64 编码的 PNG"; return false; }
+            if (tex.png.size() > 512 * 1024) { error = f + " 超过 512 KB"; return false; }
+            if (!skinjson::pngSize(tex.png, tex.pixelWidth, tex.pixelHeight) ||
+                tex.pixelWidth < 1 || tex.pixelHeight < 1 ||
+                tex.pixelWidth > 512 || tex.pixelHeight > 512) {
+                error = f + " 不是有效的 PNG（或尺寸超过 512×512）";
+                return false;
+            }
+            s.partTextures[k] = std::move(tex);
+        }
+    }
+    if (const Value* pto = root.get("partTextureOptions"); pto && pto->type != Value::JNull) {
+        if (pto->type != Value::JObject) { error = "partTextureOptions 必须是对象"; return false; }
+        auto readOptBool = [&](const char* key, bool& dst) -> bool {
+            const Value* v = pto->get(key);
+            if (!v || v->type == Value::JNull) return true;
+            if (v->type != Value::JBool) {
+                error = std::string("partTextureOptions.") + key + " 必须是布尔值";
+                return false;
+            }
+            dst = v->b;
+            return true;
+        };
+        if (!readOptBool("hideDefaultPupil", s.partTextureOptions.hideDefaultPupil) ||
+            !readOptBool("hideDefaultNose", s.partTextureOptions.hideDefaultNose) ||
+            !readOptBool("hideDefaultMouth", s.partTextureOptions.hideDefaultMouth)) {
+            return false;
         }
     }
 

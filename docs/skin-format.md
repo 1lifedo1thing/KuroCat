@@ -35,6 +35,8 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
 | `partGradients` | 对象 |  | 按部位的渐变底色，键为 `body` / `head` / `tail` / `leftArm` / `rightArm` / `hindLeg`，值为 `{ "from": "#…", "to": "#…", "angle": 0, "stop": 0.5 }`（`from`/`to` 也可写 `start`/`end`；`angle` −360…360 度；`stop` 0.1…0.9 是中点位置） |
 | `renderStyle` | 字符串 |  | 整只猫换成特殊造型：`"douni"`（小豆泥）、`"dazed"`（呆猫）、`"beagle"`（比格）；其他值按普通小猫画。网页另有 `"damiao"`、`"naimi"` 两种，**桌宠还不支持**，导入后显示成普通小猫 |
 | `typingStyle` | 字符串 |  | 打字动作：`"douni"` 为小豆泥式拍键盘，缺省为普通 |
+| `partTextures` | 对象 |  | **1.6.0+** 透明纸部位贴图（base64 PNG，≤ 512×512、≤ 512 KB），键为 `head` / `body` / `leftEar` / `rightEar` / `leftArm` / `rightArm` / `hindLeg` / `tail` / `leftIris` / `rightIris` / `leftHindPaw` / `rightHindPaw` |
+| `partTextureOptions` | 对象 |  | **1.6.0+** `{ "hideDefaultPupil": bool, "hideDefaultNose": bool, "hideDefaultMouth": bool }`，用于隐藏默认瞳孔或把鼻嘴合进 `head` 贴图后隐藏默认矢量鼻嘴 |
 | `preview` | 字符串 |  | base64 PNG 预览图（≤ 512 KB），给网页/图库用，桌宠本身不显示 |
 
 颜色一律写成 `"#RRGGBB"` 或 `"#RRGGBBAA"`（AA 为不透明度，`FF` = 不透明）。
@@ -56,6 +58,7 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
   | 1.4.8 | 花纹笔刷 `brush`（`soft` / `airbrush` / `smudge`）与 `softness` |
   | 1.5.0 | `renderStyle: "beagle"` |
   | 1.5.3 | 超过 256 条 `marks`（上限 1024） |
+  | 1.6.0 | `partTextures`（12 部位透明像素贴图）、`partTextureOptions` |
 
   体型参数只有**偏离缺省值**时才算“用到”；颜色只有和它的后备色（如 `hindLeg` 之于 `legs`）不同才算。
 - `minAppVersion` 高于 1.5.2 时写 `formatVersion: 2`，否则写 `1`。1.5.2 及更早只认 1，所以会直接提示升级；

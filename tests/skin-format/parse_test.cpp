@@ -132,6 +132,28 @@ int main() {
         rejects(withMarks(1025), "1024");
     }
 
+    // 1.6.0 partTextures + partTextureOptions round-trip & validation
+    {
+        const char* tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        std::string ptJson = std::string(R"({"formatVersion":2,"name":"图层测试","minAppVersion":"1.6.0","palette":{"body":"#111111"},"partTextures":{"head":")") +
+            tinyPng + R"(","leftIris":")" + tinyPng + R"(","leftHindPaw":")" + tinyPng +
+            R"("},"partTextureOptions":{"hideDefaultPupil":true,"hideDefaultNose":true,"hideDefaultMouth":false}})";
+        SkinSpec::appVersion = "1.6.0";
+        SkinSpec pt = accepts(ptJson);
+        SkinSpec::appVersion.clear();
+        CHECK(pt.hasPartTexture("head") && pt.hasPartTexture("leftIris") && pt.hasPartTexture("leftHindPaw"), "partTextures keys parsed");
+        CHECK(!pt.hasPartTexture("body"), "unprovided partTexture absent");
+        CHECK(pt.partTexture("leftIris") && pt.partTexture("leftIris")->pixelWidth == 1 && pt.partTexture("leftIris")->pixelHeight == 1, "partTexture dimensions parsed");
+        CHECK(pt.hasPartArt(SkinSpace::Head) && !pt.hasPartArt(SkinSpace::Body), "hasPartArt reflects partTextures");
+        CHECK(pt.partTextureOptions.hideDefaultPupil && pt.partTextureOptions.hideDefaultNose && !pt.partTextureOptions.hideDefaultMouth, "partTextureOptions parsed");
+
+        SkinSpec futurePt = accepts(std::string(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"},"partTextures":{"wing":")") + tinyPng + "\"}}");
+        CHECK(!futurePt.hasPartTexture("wing"), "unknown future partTexture key skipped");
+        rejects(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"},"partTextures":123})", "partTextures");
+        rejects(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"},"partTextures":{"head":"aGVsbG8="}})", "PNG");
+        rejects(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"},"partTextureOptions":{"hideDefaultPupil":"yes"}})", "hideDefaultPupil");
+    }
+
     if (failures) { std::printf("%d check(s) failed\n", failures); return 1; }
     std::printf("PASS: .kurocat parser — templates/sample load, 28 malformed inputs rejected in Chinese, clamping/defaults/escapes/stickers OK\n");
     return 0;

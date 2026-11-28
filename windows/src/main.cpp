@@ -27,6 +27,7 @@ using std::max;
 #include <endpointvolume.h>
 #include <string>
 #include <vector>
+#include <initializer_list>
 #include <unordered_set>
 #include <cmath>
 #include <cstdlib>
@@ -62,7 +63,7 @@ using std::max;
 
 namespace {
 
-constexpr const wchar_t* APP_VERSION = L"1.5.4";
+constexpr const wchar_t* APP_VERSION = L"1.6.0";
 constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray owner window so newer builds can take over older ones
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
@@ -75,6 +76,7 @@ constexpr UINT WM_UPDATE_CHECK_DONE = WM_APP + 3;
 constexpr UINT WM_UPDATE_DOWNLOAD_DONE = WM_APP + 4;
 constexpr UINT WM_REQUEST_QUIT = WM_APP + 5; // posted by a newer / elevated instance that is taking over
 constexpr UINT_PTR TIMER_RENDER = 1;
+constexpr UINT_PTR TIMER_CHANGELOG = 2;
 constexpr int HOTKEY_CLICKTHROUGH_ID = 101;
 UINT g_msgTaskbarCreated = 0;
 
@@ -120,6 +122,7 @@ enum MenuCmd : UINT {
     CMD_SCALE_150,
     CMD_DEMO_BURST,
     CMD_RESET_POS,
+    CMD_OPEN_CHANGELOG,
     CMD_CHECK_UPDATE,
     CMD_OPEN_UPDATE,
     CMD_RELAUNCH_ADMIN,
@@ -157,6 +160,9 @@ struct UpdateCheckResult {
     bool hasUpdate = false;
     std::wstring latestTag;
     std::wstring releaseUrl;
+    std::wstring notesZh;
+    std::wstring notesEn;
+    std::wstring notes;
 };
 
 struct UpdateDownloadResult {
@@ -268,9 +274,6 @@ struct AppState {
     bool inContextMenu = false;
     POINT dragStartCursor = {};
     POINT dragStartWinOrigin = {};
-    POINT lastDragCursor = {};
-    float dragScruffDeltaX = 0.0f;
-    float dragScruffDeltaY = 0.0f;
     bool hasLastHover = false;
     Pt lastHoverCanvas = {};
     std::string statsDay;
@@ -512,17 +515,158 @@ bool hasVisibleWindowAbove(HWND hwnd) {
 
 // MARK: - Auto Update Checker (GitHub Releases via WinHTTP)
 
+inline void appendUtf8CodePoint(std::string& out, unsigned int cp) {
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0x10FFFFu) {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+}
+
+inline bool parseHex4(const std::string& s, size_t pos, unsigned int& val) {
+    if (pos + 4 > s.size()) return false;
+    unsigned int acc = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        char c = s[pos + i];
+        acc <<= 4;
+        if (c >= '0' && c <= '9') acc |= static_cast<unsigned int>(c - '0');
+        else if (c >= 'a' && c <= 'f') acc |= static_cast<unsigned int>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') acc |= static_cast<unsigned int>(c - 'A' + 10);
+        else return false;
+    }
+    val = acc;
+    return true;
+}
+
 std::string extractJsonStringField(const std::string& json, const char* fieldName) {
     std::string key = std::string("\"") + fieldName + "\"";
-    size_t pos = json.find(key);
-    if (pos == std::string::npos) return "";
-    pos = json.find(':', pos + key.size());
-    if (pos == std::string::npos) return "";
-    pos = json.find('"', pos + 1);
-    if (pos == std::string::npos) return "";
-    size_t end = json.find('"', pos + 1);
-    if (end == std::string::npos) return "";
-    return json.substr(pos + 1, end - pos - 1);
+    auto isWs = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+    size_t searchPos = 0;
+    while (true) {
+        size_t pos = json.find(key, searchPos);
+        if (pos == std::string::npos) return "";
+        searchPos = pos + key.size();
+        size_t i = searchPos;
+        while (i < json.size() && isWs(json[i])) ++i;
+        if (i >= json.size() || json[i] != ':') continue;
+        ++i;
+        while (i < json.size() && isWs(json[i])) ++i;
+        if (i >= json.size() || json[i] != '"') return "";
+        ++i;
+
+        std::string out;
+        while (i < json.size()) {
+            char c = json[i++];
+            if (c == '"') return out;
+            if (c == '\\') {
+                if (i >= json.size()) break;
+                char esc = json[i++];
+                switch (esc) {
+                    case '"': out.push_back('"'); break;
+                    case '\\': out.push_back('\\'); break;
+                    case '/': out.push_back('/'); break;
+                    case 'b': out.push_back('\b'); break;
+                    case 'f': out.push_back('\f'); break;
+                    case 'n': out.push_back('\n'); break;
+                    case 'r': out.push_back('\r'); break;
+                    case 't': out.push_back('\t'); break;
+                    case 'u': {
+                        unsigned int u1 = 0;
+                        if (parseHex4(json, i, u1)) {
+                            i += 4;
+                            if (u1 >= 0xD800u && u1 <= 0xDBFFu &&
+                                i + 6 <= json.size() && json[i] == '\\' && json[i + 1] == 'u') {
+                                unsigned int u2 = 0;
+                                if (parseHex4(json, i + 2, u2) && u2 >= 0xDC00u && u2 <= 0xDFFFu) {
+                                    i += 6;
+                                    unsigned int cp = 0x10000u + (((u1 - 0xD800u) << 10) | (u2 - 0xDC00u));
+                                    appendUtf8CodePoint(out, cp);
+                                    break;
+                                }
+                            }
+                            appendUtf8CodePoint(out, u1);
+                        }
+                        break;
+                    }
+                    default:
+                        out.push_back(esc);
+                        break;
+                }
+            } else {
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
+}
+
+std::string extractFirstJsonStringField(const std::string& json, std::initializer_list<const char*> keys) {
+    for (const char* k : keys) {
+        std::string v = extractJsonStringField(json, k);
+        if (!v.empty()) return v;
+    }
+    return "";
+}
+
+std::wstring formatReleaseNotes(const std::wstring& raw) {
+    if (raw.empty()) return L"";
+    std::wstring norm;
+    norm.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+        wchar_t c = raw[i];
+        if (c == L'\r') {
+            norm.push_back(L'\n');
+            if (i + 1 < raw.size() && raw[i + 1] == L'\n') ++i;
+        } else {
+            norm.push_back(c);
+        }
+    }
+    auto isSpace = [](wchar_t c) {
+        return c == L' ' || c == L'\t' || c == L'\n' || c == L'\r';
+    };
+    size_t start = 0;
+    while (start < norm.size() && isSpace(norm[start])) ++start;
+    size_t end = norm.size();
+    while (end > start && isSpace(norm[end - 1])) --end;
+    if (start >= end) return L"";
+    norm = norm.substr(start, end - start);
+
+    const int maxLines = 16;
+    const size_t maxChars = 1200;
+    int lineCount = 1;
+    bool truncated = false;
+    size_t cutPos = norm.size();
+    for (size_t i = 0; i < norm.size(); ++i) {
+        if (i >= maxChars) {
+            cutPos = i;
+            truncated = true;
+            break;
+        }
+        if (norm[i] == L'\n') {
+            if (lineCount >= maxLines) {
+                cutPos = i;
+                truncated = true;
+                break;
+            }
+            ++lineCount;
+        }
+    }
+    std::wstring clamped = norm.substr(0, cutPos);
+    while (!clamped.empty() && isSpace(clamped.back())) clamped.pop_back();
+    if (truncated) clamped += L"\u2026";
+    return clamped;
 }
 
 bool isSemVerNewer(const std::wstring& lhs, const std::wstring& rhs) {
@@ -707,16 +851,25 @@ DWORD WINAPI updateCheckThreadProc(LPVOID param) {
             std::string body = fetchWorkBuddyPath(hConnect, L"/version.json?sharecode=JVAABIVZ7L");
             std::string tag = extractJsonStringField(body, "tag_name");
             std::string url = extractJsonStringField(body, "html_url");
+            std::string notesZh = extractFirstJsonStringField(body, { "changelog_zh", "notes_zh" });
+            std::string notesEn = extractFirstJsonStringField(body, { "changelog_en", "notes_en" });
+            std::string notes = extractFirstJsonStringField(body, { "changelog", "notes", "release_notes", "body" });
 
             if (tag.empty()) {
                 std::string html = fetchWorkBuddyPath(hConnect, L"/?sharecode=JVAABIVZ7L");
                 tag = extractVersionFromHtml(html);
+                notesZh.clear();
+                notesEn.clear();
+                notes.clear();
             }
 
             if (!tag.empty()) {
                 res->ok = true;
                 res->latestTag = utf8ToWide(tag);
                 res->releaseUrl = url.empty() ? UPDATE_PAGE_URL : utf8ToWide(url);
+                res->notesZh = utf8ToWide(notesZh);
+                res->notesEn = utf8ToWide(notesEn);
+                res->notes = utf8ToWide(notes);
                 res->hasUpdate = isSemVerNewer(res->latestTag, APP_VERSION);
             }
             WinHttpCloseHandle(hConnect);
@@ -3547,12 +3700,51 @@ void showUpdateResultWindow(AppState& app,
     }
 }
 
+void showChangelogWindow(AppState& app) {
+    bool en = app.settings.isEnglish;
+    std::string verUtf8;
+    for (wchar_t ch : std::wstring(APP_VERSION)) verUtf8.push_back((char)ch);
+    app.settings.lastSeenChangelogVersion = verUtf8;
+    app.settings.saveToRegistry();
+
+    std::wstring title = en
+        ? (L"KuroCat v" + std::wstring(APP_VERSION) + L" What's New")
+        : (L"KuroCat v" + std::wstring(APP_VERSION) + L" \u66F4\u65B0\u65E5\u5FD7");
+    std::wstring heading = en
+        ? (L"Welcome to KuroCat v" + std::wstring(APP_VERSION))
+        : (L"\u6B22\u8FCE\u4F7F\u7528 KuroCat v" + std::wstring(APP_VERSION) + L"\uFF01\u672C\u6B21\u6838\u5FC3\u5347\u7EA7\uFF1A");
+    std::wstring body = en
+        ? L"- 12-Part Transparent Pixel Layer Engine: full-area painting, clipping masks, alpha lock, blend modes & selection transform in Skin Workshop.\n"
+          L"- True 3D Spherical Head + Curved Limb/Tail Warps: cached 3D head turns and Bezier strips, plus direct custom irises, nose & mouth.\n"
+          L"- Unoccluded Paws: hand-painted paw tips & sitting hind paws render directly without default cuffs/pads covering them.\n"
+          L"- Full-Bleed Workshop & Floating Pet: enlarged workspace, draggable/resizable preview & .kurocat v2 support."
+        : L"\u2022 12 \u90E8\u4F4D\u300C\u4E00\u53E0\u900F\u660E\u7EB8\u300D\u50CF\u7D20\u56FE\u5C42\u5F15\u64CE\uFF1A\u652F\u6301\u5DE5\u574A\u5168\u53EF\u89C1\u533A\u76F4\u7ED8\u3001\u88C1\u526A\u8499\u7248\u3001\u900F\u660E\u9501\u3001\u6DF7\u5408\u6A21\u5F0F\u4E0E\u9009\u533A\u53D8\u6362\u3002\n"
+          L"\u2022 \u771F 3D \u7403\u9762\u5934\u90E8 + \u56DB\u80A2/\u5C3E\u5DF4\u5F2F\u66F2\u8D34\u56FE\uFF1A\u5E26\u7F13\u5B58\uFF0C\u8F6C\u5934\u3001\u547C\u5438\u4E0E\u8DB4\u7761\u81EA\u7136\u8DDF\u52A8\uFF1B\u652F\u6301\u72EC\u7ACB\u773C\u7403\u8D34\u56FE\u4E0E\u9F3B/\u5634\u76F4\u7ED8\u3002\n"
+          L"\u2022 \u722A\u5C16\u4E0E\u5750\u59FF\u540E\u722A\u76F4\u7ED8\uFF1A\u81EA\u5B9A\u4E49\u76AE\u80A4\u4E0D\u518D\u88AB\u9ED8\u8BA4\u8272\u5757\u906E\u6321\uFF0C\u5DE5\u574A\u3001\u5B98\u7F51\u4E0E\u4E09\u7AEF\u684C\u5BA0\u5B8C\u5168\u540C\u6B65\u3002\n"
+          L"\u2022 \u76AE\u80A4\u5DE5\u574A\u5927\u753B\u677F + \u60AC\u6D6E\u900F\u660E\u9884\u89C8\uFF1A\u5168\u5C4F\u7ED8\u753B\u7A7A\u95F4\u3001\u81EA\u7531\u62D6\u52A8/\u7F29\u653E\u5C0F\u732B\u4E0E .kurocat v2 \u5BFC\u5165\u5BFC\u51FA\u3002";
+    showUpdateResultWindow(
+        app, UpdateDialogKind::UpToDate, title, heading, body, false, true,
+        L"https://chanke17.github.io/KuroCat-Workshop/",
+        en ? L"Got It" : L"\u77E5\u9053\u4E86",
+        en ? L"Open Skin Workshop" : L"\u6253\u5F00\u76AE\u80A4\u5DE5\u574A",
+        L"");
+}
+
 void handleUpdateCheckResult(AppState& app, const UpdateCheckResult& res) {
     bool en = app.settings.isEnglish;
     if (res.ok && res.hasUpdate) {
         app.availableUpdateVersion = res.latestTag;
         app.availableUpdateUrl = res.releaseUrl;
         if (!res.manual && app.settings.suppressAutoUpdatePrompt) return;
+
+        std::wstring rawNotes = en
+            ? (!res.notesEn.empty() ? res.notesEn : (!res.notes.empty() ? res.notes : res.notesZh))
+            : (!res.notesZh.empty() ? res.notesZh : (!res.notes.empty() ? res.notes : res.notesEn));
+        std::wstring releaseNotes = formatReleaseNotes(rawNotes);
+        std::wstring notesBlock;
+        if (!releaseNotes.empty()) {
+            notesBlock = (en ? L"\n\nWhat's New:\n" : L"\n\n\u66F4\u65B0\u5185\u5BB9\uFF1A\n") + releaseNotes;
+        }
 
         std::wstring title = en ? L"KuroCat Update Available" : L"KuroCat \u66F4\u65B0\u63D0\u9192";
         std::wstring heading = en
@@ -3561,10 +3753,12 @@ void handleUpdateCheckResult(AppState& app, const UpdateCheckResult& res) {
         std::wstring body = en
             ? (L"Current version: v" + std::wstring(APP_VERSION)
                 + L"\nRunning executable: " + currentExePath()
+                + notesBlock
                 + L"\n\nIf you already downloaded the new version, double-click the new exe to replace this copy automatically."
                 + L"\n\nClick \"Update Now\" to download, update, and restart automatically.\nClick \"Later\" to stop automatic update prompts (you can still check manually from the menu).")
             : (L"\u5F53\u524D\u7248\u672C\uFF1Av" + std::wstring(APP_VERSION)
                 + L"\n\u5F53\u524D\u8FD0\u884C\u7684\u7A0B\u5E8F\uFF1A" + currentExePath()
+                + notesBlock
                 + L"\n\n\u5982\u679C\u4F60\u5DF2\u7ECF\u4E0B\u8F7D\u8FC7\u65B0\u7248\uFF0C\u76F4\u63A5\u53CC\u51FB\u65B0\u7248 exe \u5373\u53EF\u81EA\u52A8\u66FF\u6362\u6389\u8FD9\u4E2A\u65E7\u7248\u3002"
                 + L"\n\n\u70B9\u51FB\u300C\u7ACB\u5373\u66F4\u65B0\u300D\u5C06\u81EA\u52A8\u4E0B\u8F7D\u5E76\u66F4\u65B0\u91CD\u542F\uFF1B\n\u70B9\u51FB\u300C\u6682\u4E0D\u66F4\u65B0\u300D\u540E\u7EED\u5C06\u4E0D\u518D\u81EA\u52A8\u5F39\u7A97\u63D0\u9192\uFF08\u968F\u65F6\u53EF\u5728\u53F3\u952E\u83DC\u5355\u70B9\u51FB\u300C\u68C0\u67E5\u66F4\u65B0\u300D\uFF09\u3002");
         showUpdateResultWindow(
@@ -3712,6 +3906,10 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(menu, MF_STRING, CMD_OPEN_SETTINGS, tr(L"\u2699\uFE0F \u8BBE\u7F6E\u2026", L"\u2699\uFE0F Settings..."));
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    {
+        std::wstring clTxt = std::wstring(tr(L"\u2728 \u66F4\u65B0\u65E5\u5FD7 (v", L"\u2728 What's New (v")) + APP_VERSION + L")";
+        AppendMenuW(menu, MF_STRING, CMD_OPEN_CHANGELOG, clTxt.c_str());
+    }
     if (!app.availableUpdateVersion.empty()) {
         std::wstring upTxt = app.isUpdating
             ? (std::wstring(tr(L"\u23F3 \u6B63\u5728\u4E0B\u8F7D\u66F4\u65B0 ", L"\u23F3 Downloading update ")) + app.availableUpdateVersion + L"...")
@@ -3957,6 +4155,9 @@ void showContextMenu(AppState& app, POINT screenPt) {
             app.settings.posY = -99999;
             applyWindowScaleAndPosition(app, false);
             break;
+        case CMD_OPEN_CHANGELOG:
+            showChangelogWindow(app);
+            break;
         case CMD_CHECK_UPDATE:
             if (app.menuOwnerHwnd && !app.isManualUpdateCheck) {
                 app.isManualUpdateCheck = startAsyncUpdateCheck(app.menuOwnerHwnd, true, 0);
@@ -4087,18 +4288,6 @@ void tickAndRender(AppState& app) {
     }
 
     // Smart Click-Through + Petting Detection
-    if (app.isDragging) {
-        POINT cur = {};
-        GetCursorPos(&cur);
-        float t = std::clamp(app.physics.scruffDrag.value, 0.0f, 1.0f);
-        float ease = t * t * (3.0f - 2.0f * t);
-        int nx = app.dragStartWinOrigin.x + (cur.x - app.dragStartCursor.x) + (int)std::lround(app.dragScruffDeltaX * ease);
-        int ny = app.dragStartWinOrigin.y + (cur.y - app.dragStartCursor.y) + (int)std::lround(app.dragScruffDeltaY * ease);
-        if (nx != wr.left || ny != wr.top) {
-            SetWindowPos(app.hwnd, nullptr, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            GetWindowRect(app.hwnd, &wr);
-        }
-    }
     if (!app.isDragging && app.activeResizeCorner < 0 && !app.isRotating) {
         POINT cur = {};
         GetCursorPos(&cur);
@@ -4309,6 +4498,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_TIMER:
             if (wParam == TIMER_RENDER && app) renderIfDue(*app);
+            else if (wParam == TIMER_CHANGELOG && app) {
+                KillTimer(hwnd, TIMER_CHANGELOG);
+                showChangelogWindow(*app);
+            }
             return 0;
 
         case WM_WTSSESSION_CHANGE:
@@ -4442,17 +4635,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->isDragging = true;
                 app->dragMouseButton = 1;
                 app->dragStartCursor = cur;
-                app->lastDragCursor = cur;
                 app->dragStartWinOrigin = { wr.left, wr.top };
-                if (app->settings.enableDragAnimation) {
-                    Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*app), app->settings.flipHorizontal, app->settings.rotationDeg);
-                    float sc = (float)std::max(1L, wr.right - wr.left) / CatPhysics::CanvasWidth;
-                    app->dragScruffDeltaX = (float)cur.x - pinch.x * sc - (float)wr.left;
-                    app->dragScruffDeltaY = (float)cur.y - pinch.y * sc - (float)wr.top;
-                } else {
-                    app->dragScruffDeltaX = 0.0f;
-                    app->dragScruffDeltaY = 0.0f;
-                }
                 app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
                 SetCapture(hwnd);
             }
@@ -4519,17 +4702,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     app->isDragging = true;
                     app->dragMouseButton = 2;
                     app->dragStartCursor = app->rButtonDownCursor;
-                    app->lastDragCursor = cur;
                     app->dragStartWinOrigin = { wr.left, wr.top };
-                    if (app->settings.enableDragAnimation) {
-                        Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*app), app->settings.flipHorizontal, app->settings.rotationDeg);
-                        float sc = (float)std::max(1L, wr.right - wr.left) / CatPhysics::CanvasWidth;
-                        app->dragScruffDeltaX = (float)app->rButtonDownCursor.x - pinch.x * sc - (float)wr.left;
-                        app->dragScruffDeltaY = (float)app->rButtonDownCursor.y - pinch.y * sc - (float)wr.top;
-                    } else {
-                        app->dragScruffDeltaX = 0.0f;
-                        app->dragScruffDeltaY = 0.0f;
-                    }
                     app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
                 }
             }
@@ -4540,8 +4713,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (!activeBtnDown) {
                     app->isDragging = false;
                     app->dragMouseButton = 0;
-                    app->dragScruffDeltaX = 0.0f;
-                    app->dragScruffDeltaY = 0.0f;
                     app->physics.setDragging(false);
                     if (GetCapture() == hwnd) ReleaseCapture();
                     RECT wr = {};
@@ -4554,13 +4725,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 POINT cur = {};
                 GetCursorPos(&cur);
-                float t = std::clamp(app->physics.scruffDrag.value, 0.0f, 1.0f);
-                float ease = t * t * (3.0f - 2.0f * t);
-                int nx = app->dragStartWinOrigin.x + (cur.x - app->dragStartCursor.x) + (int)std::lround(app->dragScruffDeltaX * ease);
-                int ny = app->dragStartWinOrigin.y + (cur.y - app->dragStartCursor.y) + (int)std::lround(app->dragScruffDeltaY * ease);
-                float stepDx = (float)(cur.x - app->lastDragCursor.x);
-                float stepDy = (float)(cur.y - app->lastDragCursor.y);
-                app->lastDragCursor = cur;
+                RECT wr = {};
+                GetWindowRect(hwnd, &wr);
+                int nx = app->dragStartWinOrigin.x + (cur.x - app->dragStartCursor.x);
+                int ny = app->dragStartWinOrigin.y + (cur.y - app->dragStartCursor.y);
+                float stepDx = (float)(nx - wr.left);
+                float stepDy = (float)(ny - wr.top);
                 float rad = -app->settings.rotationDeg * (3.14159265f / 180.0f);
                 float c = std::cos(rad), s = std::sin(rad);
                 float localDx = stepDx * c - stepDy * s;
@@ -5145,6 +5315,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     tickAndRender(app);
     app.nextFrameTime = nowSeconds() + FRAME_INTERVAL;
     SetTimer(app.hwnd, TIMER_RENDER, 16, nullptr);
+    {
+        std::string curVerUtf8;
+        for (wchar_t ch : std::wstring(APP_VERSION)) curVerUtf8.push_back((char)ch);
+        if (app.settings.lastSeenChangelogVersion != curVerUtf8) {
+            SetTimer(app.hwnd, TIMER_CHANGELOG, 1200, nullptr);
+        }
+    }
 
     app.audioPollingEnabled.store(app.settings.autoHeadphonesOnMusic, std::memory_order_relaxed);
     app.audioThread = std::thread([&app]() {

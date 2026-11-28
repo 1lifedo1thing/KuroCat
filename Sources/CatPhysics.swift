@@ -117,6 +117,10 @@ final class CatSettings {
     var suppressAutoUpdatePrompt: Bool {
         didSet { UserDefaults.standard.set(suppressAutoUpdatePrompt, forKey: "KuroCat.SuppressAutoUpdatePrompt") }
     }
+    /// Last app version whose What's New / changelog dialog has been shown to the user
+    var lastSeenChangelogVersion: String {
+        didSet { UserDefaults.standard.set(lastSeenChangelogVersion, forKey: "KuroCat.LastSeenChangelogVersion") }
+    }
     /// 0 = Auto-detect graphics tablet/stylus, 1 = Always show tablet, 2 = Always show mouse
     var tabletMode: Int {
         didSet { UserDefaults.standard.set(tabletMode, forKey: "KuroCat.TabletMode") }
@@ -238,6 +242,7 @@ final class CatSettings {
         autoHideFullscreen = d.object(forKey: "KuroCat.AutoHideFullscreen") as? Bool ?? false
         autoHeadphonesOnMusic = d.object(forKey: "KuroCat.AutoHeadphonesOnMusic") as? Bool ?? true
         suppressAutoUpdatePrompt = d.object(forKey: "KuroCat.SuppressAutoUpdatePrompt") as? Bool ?? false
+        lastSeenChangelogVersion = d.string(forKey: "KuroCat.LastSeenChangelogVersion") ?? ""
         tabletMode = d.object(forKey: "KuroCat.TabletMode") as? Int ?? 0
         flipHorizontal = d.object(forKey: "KuroCat.FlipHorizontal") as? Bool ?? false
         rotationDeg = CGFloat(d.object(forKey: "KuroCat.RotationDeg") as? Double ?? 0.0)
@@ -1660,6 +1665,21 @@ struct SkinDecoration {
     var offsetX: CGFloat = 0, offsetY: CGFloat = 0, scale: CGFloat = 1, rotation: CGFloat = 0 // degrees
 }
 
+struct SkinPartTexture {
+    var image: CGImage
+    var width: Int
+    var height: Int
+    /// Premultiplied RGBA8888 pixel buffer (`width * height * 4` bytes) for CPU 3D dome & curved-strip warping.
+    var premulRGBA: [UInt8]
+    var cacheTag: UInt64
+}
+
+struct SkinPartTextureOptions: Hashable {
+    var hideDefaultPupil: Bool = false
+    var hideDefaultNose: Bool = false
+    var hideDefaultMouth: Bool = false
+}
+
 struct SkinPalette: Hashable {
     var body = SkinColor.rgba(0, 0, 0)
     var headBody: SkinColor?
@@ -1699,11 +1719,12 @@ struct SkinSpec {
     /// chest-coloured like the built-in coats.
     var idleLegsTinted = true
     var decorations: [SkinDecoration] = []
+    var partTextures: [String: SkinPartTexture] = [:]
+    var partTextureOptions = SkinPartTextureOptions()
     var preview: Data?
 
     static let maxFileBytes = 2 * 1024 * 1024
-    // formatVersion 2 = same fields as 1, written by the workshop when the skin needs an app newer than 1.5.2
-    // (the last release that only knew formatVersion 1); `minAppVersion` says which one.
+    // formatVersion 2 = written by the workshop when the skin needs an app newer than 1.5.2; `minAppVersion` says which one.
     static let formatVersion = 2
     static let maxMarks = 1024 // 256 up to 1.5.2
 
@@ -1718,8 +1739,23 @@ struct SkinSpec {
     }
 
     var colorpoint: Bool { palette.points != nil }
+    func partTexture(_ key: String) -> SkinPartTexture? { partTextures[key] }
+    static func partSpaceTextureKey(_ space: SkinSpace) -> String? {
+        switch space {
+        case .head: return "head"
+        case .body: return "body"
+        case .tail: return "tail"
+        case .leftEar: return "leftEar"
+        case .rightEar: return "rightEar"
+        case .leftArm: return "leftArm"
+        case .rightArm: return "rightArm"
+        case .hindLeg: return "hindLeg"
+        case .skull: return nil
+        }
+    }
     func hasPartArt(_ space: SkinSpace) -> Bool {
-        regions.contains { $0.space == space } || marks.contains { $0.space == space }
+        if let tk = SkinSpec.partSpaceTextureKey(space), partTextures[tk] != nil { return true }
+        return regions.contains { $0.space == space } || marks.contains { $0.space == space }
     }
 
     // MARK: Built-in coats (exact colours of the pre-SkinSpec CoreGraphics renderer)
@@ -2072,6 +2108,41 @@ struct SkinSpec {
             }
         }
 
+        // Per-part transparent pixel textures (1.6.0+)
+        if let ptAny = root["partTextures"], !isNull(ptAny) {
+            guard let ptDict = ptAny as? [String: Any] else { throw fail("partTextures 必须是对象") }
+            let validKeys = [
+                "head", "body", "leftEar", "rightEar", "leftArm", "rightArm", "hindLeg", "tail",
+                "leftIris", "rightIris", "leftHindPaw", "rightHindPaw"
+            ]
+            for k in validKeys {
+                guard let val = ptDict[k], !isNull(val) else { continue }
+                let f = "partTextures.\(k)"
+                guard let b64 = val as? String else { throw fail("\(f) 必须是 base64 编码的 PNG") }
+                if b64.isEmpty { continue }
+                guard let png = decodeBase64PNG(b64) else { throw fail("\(f) 必须是 base64 编码的 PNG") }
+                if png.count > 512 * 1024 { throw fail("\(f) 超过 512 KB") }
+                guard let size = pngSize(png), size.0 >= 1, size.1 >= 1, size.0 <= 512, size.1 <= 512,
+                      let provider = CGDataProvider(data: png as CFData),
+                      let rawImage = CGImage(pngDataProviderSource: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent),
+                      let decoded = predecodePartTexture(rawImage, pngBytes: png) else {
+                    throw fail("\(f) 不是有效的 PNG（或尺寸超过 512×512）")
+                }
+                spec.partTextures[k] = decoded
+            }
+        }
+        if let ptoAny = root["partTextureOptions"], !isNull(ptoAny) {
+            guard let pto = ptoAny as? [String: Any] else { throw fail("partTextureOptions 必须是对象") }
+            func optBool(_ key: String) throws -> Bool {
+                guard let v = pto[key], !isNull(v) else { return false }
+                guard isBool(v), let b = v as? Bool else { throw fail("partTextureOptions.\(key) 必须是布尔值") }
+                return b
+            }
+            spec.partTextureOptions.hideDefaultPupil = try optBool("hideDefaultPupil")
+            spec.partTextureOptions.hideDefaultNose = try optBool("hideDefaultNose")
+            spec.partTextureOptions.hideDefaultMouth = try optBool("hideDefaultMouth")
+        }
+
         if let prev = root["preview"], !isNull(prev) {
             guard let s = prev as? String, let png = decodeBase64PNG(s), pngSize(png) != nil, png.count <= 512 * 1024 else {
                 throw fail("preview 必须是不超过 512 KB 的 base64 PNG")
@@ -2093,6 +2164,28 @@ struct SkinSpec {
         }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return ctx.makeImage() ?? image
+    }
+
+    private static func predecodePartTexture(_ image: CGImage, pngBytes: Data) -> SkinPartTexture? {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0 else { return nil }
+        let bpr = w * 4
+        var rgba = [UInt8](repeating: 0, count: h * bpr)
+        let ok: Bool = rgba.withUnsafeMutableBytes { buf in
+            guard let ptr = buf.baseAddress,
+                  let ctx = CGContext(data: ptr, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bpr,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else {
+                return false
+            }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard ok else { return nil }
+        let decodedImg = predecodeCGImage(image)
+        var tag: UInt64 = 1469598103934665603
+        for b in pngBytes { tag ^= UInt64(b); tag = tag &* 1099511628211 }
+        return SkinPartTexture(image: decodedImg, width: w, height: h, premulRGBA: rgba, cacheTag: tag)
     }
 
     private static func decodeBase64PNG(_ s: String) -> Data? {

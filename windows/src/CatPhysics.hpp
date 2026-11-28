@@ -48,6 +48,7 @@ struct CatSettings {
     bool autoHideFullscreen = false;
     bool autoHeadphonesOnMusic = true;
     bool suppressAutoUpdatePrompt = false;
+    std::string lastSeenChangelogVersion;
     int tabletMode = 0; // 0 = auto-detect tablet/stylus, 1 = always tablet, 2 = always mouse
     bool flipHorizontal = false;
     float rotationDeg = 0.0f; // -180..180 degrees
@@ -95,6 +96,14 @@ struct CatSettings {
         autoHideFullscreen = readDword(L"AutoHideFullscreen", 0) != 0;
         autoHeadphonesOnMusic = readDword(L"AutoHeadphonesOnMusic", 1) != 0;
         suppressAutoUpdatePrompt = readDword(L"SuppressAutoUpdatePrompt", 0) != 0;
+        {
+            wchar_t clBuf[32] = {0};
+            DWORD type = 0, sz = sizeof(clBuf) - sizeof(wchar_t);
+            lastSeenChangelogVersion.clear();
+            if (RegQueryValueExW(hKey, L"LastSeenChangelogVersion", nullptr, &type, (LPBYTE)clBuf, &sz) == ERROR_SUCCESS && type == REG_SZ) {
+                for (int i = 0; clBuf[i]; ++i) lastSeenChangelogVersion.push_back((char)clBuf[i]);
+            }
+        }
         tabletMode       = std::clamp((int)readDword(L"TabletMode", 0), 0, 2);
         flipHorizontal   = readDword(L"FlipHorizontal", 0) != 0;
         {
@@ -178,6 +187,10 @@ struct CatSettings {
         writeDword(L"AutoHideFullscreen", autoHideFullscreen ? 1 : 0);
         writeDword(L"AutoHeadphonesOnMusic", autoHeadphonesOnMusic ? 1 : 0);
         writeDword(L"SuppressAutoUpdatePrompt", suppressAutoUpdatePrompt ? 1 : 0);
+        {
+            std::wstring clW(lastSeenChangelogVersion.begin(), lastSeenChangelogVersion.end());
+            RegSetValueExW(hKey, L"LastSeenChangelogVersion", 0, REG_SZ, (const BYTE*)clW.c_str(), (DWORD)((clW.size() + 1) * sizeof(wchar_t)));
+        }
         writeDword(L"TabletMode", (DWORD)tabletMode);
         writeDword(L"FlipHorizontal", flipHorizontal ? 1 : 0);
         writeDword(L"RotationTenths", (DWORD)(int)std::lround(std::clamp(rotationDeg, -180.0f, 180.0f) * 10.0f));

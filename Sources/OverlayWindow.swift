@@ -272,8 +272,6 @@ final class CatCanvasView: NSView {
     private var resizeStartFrame: CGRect = .zero
     private var dragStartScreenPt: CGPoint = .zero
     private var dragStartWindowOrigin: CGPoint = .zero
-    private var dragScruffAnchorDelta: CGPoint = .zero
-    private var lastDragScreenPt: CGPoint = .zero
     private var activeCursor: ActiveCursor = .arrow
     private var lastHoverWasInside = false
     private var lastDrawnPose: RenderedPose?
@@ -424,9 +422,6 @@ final class CatCanvasView: NSView {
         if isDraggingOrResizing {
             if win.ignoresMouseEvents {
                 win.ignoresMouseEvents = false
-            }
-            if isDragging {
-                syncDraggedWindowPosition(win: win)
             }
             return
         }
@@ -585,35 +580,9 @@ final class CatCanvasView: NSView {
 
         isDragging = true
         dragStartScreenPt = screenPt
-        lastDragScreenPt = screenPt
         dragStartWindowOrigin = win.frame.origin
-        dragScruffAnchorDelta = computeScruffAnchorDelta(window: win, cursorScreenPt: screenPt)
         physics.setDragging(true, dragDx: 0)
         setCursorIfNeeded(.closedHand)
-    }
-
-    private func computeScruffAnchorDelta(window win: NSWindow, cursorScreenPt screenPt: CGPoint) -> CGPoint {
-        let s = CatSettings.shared
-        guard s.enableDragAnimation else { return .zero }
-        let pinchCanvas = CatRenderer.scruffPinchCanvasPoint(skin: s.activeSkin, flipped: s.flipHorizontal, rotationDeg: s.rotationDeg)
-        let scale = win.frame.width / CatPhysics.canvasSize.width
-        let pinchOffsetX = pinchCanvas.x * scale
-        let pinchOffsetY = win.frame.height - (pinchCanvas.y + CatCanvasView.contentTopInset) * scale
-        return CGPoint(
-            x: (screenPt.x - pinchOffsetX) - win.frame.origin.x,
-            y: (screenPt.y - pinchOffsetY) - win.frame.origin.y
-        )
-    }
-
-    private func syncDraggedWindowPosition(win: NSWindow) {
-        let currentScreenPt = NSEvent.mouseLocation
-        let t = max(0, min(1, physics.scruffDrag.value))
-        let ease = t * t * (3.0 - 2.0 * t)
-        let newOrigin = CGPoint(
-            x: dragStartWindowOrigin.x + (currentScreenPt.x - dragStartScreenPt.x) + dragScruffAnchorDelta.x * ease,
-            y: dragStartWindowOrigin.y + (currentScreenPt.y - dragStartScreenPt.y) + dragScruffAnchorDelta.y * ease
-        )
-        win.setFrameOrigin(newOrigin)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -624,8 +593,6 @@ final class CatCanvasView: NSView {
             if hypot(currentScreenPt.x - doubleClickDownScreenPt.x, currentScreenPt.y - doubleClickDownScreenPt.y) >= 4.0 {
                 pendingDoubleClickToggle = false
                 isDragging = true
-                lastDragScreenPt = currentScreenPt
-                dragScruffAnchorDelta = computeScruffAnchorDelta(window: win, cursorScreenPt: dragStartScreenPt)
                 physics.setDragging(true, dragDx: 0)
                 setCursorIfNeeded(.closedHand)
             } else {
@@ -671,15 +638,20 @@ final class CatCanvasView: NSView {
             return
         }
         guard isDragging else { return }
-        let rawDx = currentScreenPt.x - lastDragScreenPt.x
-        let rawDy = -(currentScreenPt.y - lastDragScreenPt.y)
-        lastDragScreenPt = currentScreenPt
+        let prevX = win.frame.origin.x
+        let prevY = win.frame.origin.y
+        let newOrigin = CGPoint(
+            x: dragStartWindowOrigin.x + (currentScreenPt.x - dragStartScreenPt.x),
+            y: dragStartWindowOrigin.y + (currentScreenPt.y - dragStartScreenPt.y)
+        )
+        let rawDx = newOrigin.x - prevX
+        let rawDy = -(newOrigin.y - prevY)
         // Transform world drag velocity into cat-local orientation so trailing inertia matches world motion at any angle!
         let rad = -CatSettings.shared.rotationDeg * .pi / 180.0
         let localDx = rawDx * cos(rad) - rawDy * sin(rad)
         let localDy = rawDx * sin(rad) + rawDy * cos(rad)
         physics.setDragging(true, dragDx: CatSettings.shared.flipHorizontal ? -localDx : localDx, dragDy: localDy)
-        syncDraggedWindowPosition(win: win)
+        win.setFrameOrigin(newOrigin)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -710,7 +682,6 @@ final class CatCanvasView: NSView {
         }
         guard isDragging else { return }
         isDragging = false
-        dragScruffAnchorDelta = .zero
         physics.setDragging(false)
         setCursorIfNeeded(.openHand)
         // Save position immediately so restarts always preserve exact coordinates
@@ -1689,7 +1660,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let cardW: CGFloat = winW - padX * 2
 
         let root = FlippedView(frame: NSRect(x: 0, y: 0, width: winW, height: winH))
-        let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.5.2"
+        let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.6.0"
 
         // MARK: Minimal Typographic Header (no logo, no bulky banner card)
         let titleLbl = NSTextField(labelWithString: tr("KuroCat 设置", "KuroCat Settings"))
